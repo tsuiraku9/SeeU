@@ -1,0 +1,125 @@
+services:
+  archive:
+    build: .
+    container_name: public-content-archive
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      WEBUI_LOGIN_TOKEN: ${WEBUI_LOGIN_TOKEN:-}
+      WEBUI_PORT: ${WEBUI_PORT:-${APP_PORT:-8080}}
+      SESSION_SECRET: ${SESSION_SECRET:?Set SESSION_SECRET in .env}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      APP_BIND_ADDRESS: ${APP_BIND_ADDRESS:-127.0.0.1}
+      SCHEDULER_ENABLED: ${SCHEDULER_ENABLED:-true}
+      DATABASE_PATH: /app/data/state/app.db
+      ARCHIVE_ROOT: /app/data/archive
+      BROWSER_DATA_ROOT: /tmp/archive-browser
+      PROVIDER_STAGING_ROOT: /app/data/provider-staging
+      CRAWLER_BRIDGE_URL: http://crawler:8090
+      CRAWLER_PROVIDER_ENABLED: ${CRAWLER_PROVIDER_ENABLED:-true}
+      NOVNC_BIND_ADDRESS: ${NOVNC_BIND_ADDRESS:-127.0.0.1}
+      NOVNC_PORT: ${NOVNC_PORT:-7900}
+      TZ: ${TZ:-Asia/Hong_Kong}
+      HOME: /tmp/archive-home
+      TMPDIR: /app/data/provider-staging
+    command:
+      - uvicorn
+      - app.main:app
+      - --app-dir
+      - backend
+      - --host
+      - 0.0.0.0
+      - --port
+      - ${WEBUI_PORT:-${APP_PORT:-8080}}
+      - --proxy-headers
+      - --forwarded-allow-ips
+      - 127.0.0.1
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import os, urllib.request;
+          port = os.environ.get('WEBUI_PORT', '8080');
+          urllib.request.urlopen(f'http://127.0.0.1:{port}/api/health', timeout=3)
+      interval: 30s
+      timeout: 5s
+      start_period: 25s
+      retries: 3
+    ports:
+      - target: ${WEBUI_PORT:-${APP_PORT:-8080}}
+        published: "${WEBUI_PORT:-${APP_PORT:-8080}}"
+        host_ip: "${APP_BIND_ADDRESS:-127.0.0.1}"
+        protocol: tcp
+    volumes:
+      - ./data/archive:/app/data/archive
+      - ./data/state:/app/data/state
+      - ./data/provider-staging:/app/data/provider-staging
+    read_only: true
+    tmpfs:
+      - /tmp:size=512m,mode=1777
+    init: true
+    pids_limit: 512
+    mem_limit: ${ARCHIVE_MEMORY_LIMIT:-2g}
+    shm_size: "1gb"
+    cap_drop:
+      - NET_RAW
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    depends_on:
+      crawler:
+        condition: service_healthy
+
+  crawler:
+    build:
+      context: ./crawler
+      args:
+        MEDIACRAWLER_COMMIT: d280d22
+    container_name: public-content-crawler
+    restart: unless-stopped
+    environment:
+      DATA_ROOT: /data
+      TZ: ${TZ:-Asia/Hong_Kong}
+      DISCOVER_TIMEOUT_SECONDS: ${DISCOVER_TIMEOUT_SECONDS:-840}
+      STAGE_TIMEOUT_SECONDS: ${STAGE_TIMEOUT_SECONDS:-840}
+      LOGIN_TIMEOUT_SECONDS: ${LOGIN_TIMEOUT_SECONDS:-600}
+      MANUAL_VERIFICATION_TIMEOUT_SECONDS: ${MANUAL_VERIFICATION_TIMEOUT_SECONDS:-480}
+      MAX_STAGE_FILES: ${IMPORT_MAX_FILES:-100}
+      MAX_STAGE_BYTES: ${MEDIA_MAX_BYTES:-2147483648}
+      MIN_STAGE_FREE_GB: ${MIN_FREE_DISK_GB:-5}
+      NOVNC_PORT: ${NOVNC_PORT:-7900}
+      NOVNC_BIND_ADDRESS: ${NOVNC_BIND_ADDRESS:-127.0.0.1}
+    expose:
+      - "8090"
+    ports:
+      - target: 7900
+        published: "${NOVNC_PORT:-7900}"
+        host_ip: "${NOVNC_BIND_ADDRESS:-127.0.0.1}"
+        protocol: tcp
+    volumes:
+      - ./data/browser/mediacrawler:/data/browser/mediacrawler
+      - ./data/provider-staging:/data/provider-staging
+      - ./data/provider-state:/data/provider-state
+    init: true
+    pids_limit: 1024
+    mem_limit: ${CRAWLER_MEMORY_LIMIT:-3g}
+    shm_size: "2gb"
+    cap_drop:
+      - NET_RAW
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 45s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

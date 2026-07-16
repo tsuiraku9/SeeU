@@ -1,0 +1,51 @@
+.env
+.env.*
+!.env.example
+.venv/
+.pnpm-store/
+.agents/
+.codex/
+# Local empty repository created alongside this workspace; never nest it in
+# the project repository.
+/SeeU/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage/
+htmlcov/
+blob-report/
+node_modules/
+frontend/dist/
+playwright-report/
+test-results/
+.vite/
+.cache/
+build/
+dist/
+*.egg-info/
+*.tsbuildinfo
+frontend/vite.config.js
+frontend/vite.config.d.ts
+# All runtime data may contain archived content, login profiles, signed URLs,
+# SQLite state, QR handoff state, or generated diagnostics.
+data/
+*.log
+*.log.*
+logs/
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+webui-login-token.txt
+storage-state*.json
+storage_state*.json
+cookies*.json
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
