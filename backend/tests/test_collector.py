@@ -18,6 +18,8 @@ from app.models import (
     ObservedContent,
     Platform,
 )
+from app.provider import ProviderExecutionError
+from app.provider import LoginRequiredError
 
 
 class FakeAdapter:
@@ -88,6 +90,13 @@ async def test_first_poll_archives_only_newest_history_and_second_archives_only_
         "baseline_ids": ["history-middle", "history-oldest"],
         "seed_content_id": "history-newest",
         "seed_archived": True,
+        "provider_path": "fallback",
+        "primary_provider_failure": {
+            "code": "provider_unavailable",
+            "phase": None,
+            "retryable": None,
+            "message": "Crawler provider is disabled",
+        },
     }
     with SessionLocal() as db:
         account = db.get(Account, account_id)
@@ -463,6 +472,165 @@ async def test_legacy_index_alias_prevents_duplicate_archive(monkeypatch):
 def test_error_diagnostics_redact_url_queries():
     error = RuntimeError("download failed https://cdn.example/video.mp4?token=secret&expires=1")
     assert safe_error(error) == "download failed https://cdn.example/video.mp4?[query-redacted]"
+
+
+@pytest.mark.asyncio
+async def test_fallback_failure_preserves_primary_provider_diagnostics(monkeypatch):
+    class BrokenFallback(FakeAdapter):
+        async def fetch_latest(self, _url):
+            raise RuntimeError(
+                "fallback blocked https://api.example/items?access_token=fallback-secret"
+            )
+
+    broken = BrokenFallback()
+    monkeypatch.setattr(
+        collector_module,
+        "get_adapter",
+        lambda _platform, _settings: broken,
+    )
+    with SessionLocal() as db:
+        account = Account(
+            platform=Platform.bilibili,
+            display_name="combined diagnostics",
+            slug="combined-diagnostics",
+            source_url="https://space.bilibili.com/995",
+        )
+        db.add(account)
+        db.commit()
+        account_id = account.id
+
+    collector = CollectorService(get_settings())
+
+    async def fail_provider(*_args, **_kwargs):
+        raise ProviderExecutionError(
+            "provider rejected https://cdn.example/media?token=primary-secret",
+            code="provider_contract_invalid",
+            phase="discovery_contract",
+            retryable=False,
+        )
+
+    monkeypatch.setattr(collector.provider, "discover", fail_provider)
+    result = await collector.poll_account(account_id)
+
+    assert result.status == JobStatus.failed
+    assert "primary-secret" not in (result.error or "")
+    assert "fallback-secret" not in (result.error or "")
+    assert "MediaCrawler discovery failed" in (result.error or "")
+    assert "fallback discovery failed" in (result.error or "")
+    assert result.details == {
+        "provider_path": "fallback",
+        "primary_provider_failure": {
+            "code": "provider_contract_invalid",
+            "phase": "discovery_contract",
+            "retryable": False,
+            "message": "provider rejected https://cdn.example/media?[query-redacted]",
+        },
+        "fallback_failure": {
+            "type": "RuntimeError",
+            "message": "fallback blocked https://api.example/items?[query-redacted]",
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_non_fallback_provider_failure_preserves_structured_diagnostics(monkeypatch):
+    fake = FakeAdapter()
+    fake.platform = Platform.xiaohongshu
+    monkeypatch.setattr(
+        collector_module,
+        "get_adapter",
+        lambda _platform, _settings: fake,
+    )
+    with SessionLocal() as db:
+        account = Account(
+            platform=Platform.xiaohongshu,
+            display_name="provider diagnostics",
+            slug="provider-diagnostics",
+            source_url="https://www.xiaohongshu.com/user/profile/123",
+        )
+        db.add(account)
+        db.commit()
+        account_id = account.id
+
+    collector = CollectorService(get_settings())
+
+    async def require_login(*_args, **_kwargs):
+        raise LoginRequiredError(
+            "session expired",
+            code="login_required",
+            phase="session",
+            retryable=True,
+        )
+
+    monkeypatch.setattr(collector.provider, "discover", require_login)
+    result = await collector.poll_account(account_id)
+
+    assert result.status == JobStatus.failed
+    assert result.error == "session expired"
+    assert result.details == {
+        "provider_path": "mediacrawler",
+        "primary_provider_failure": {
+            "code": "login_required",
+            "phase": "session",
+            "retryable": True,
+            "message": "session expired",
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_default_poll_concurrency_serializes_different_platform_browsers(
+    monkeypatch,
+):
+    class EmptyAdapter(FakeAdapter):
+        def __init__(self, platform):
+            super().__init__()
+            self.platform = platform
+
+    monkeypatch.setattr(
+        collector_module,
+        "get_adapter",
+        lambda platform, _settings: EmptyAdapter(platform),
+    )
+    with SessionLocal() as db:
+        accounts = [
+            Account(
+                platform=platform,
+                display_name=f"serialized {platform.value}",
+                slug=f"serialized-{platform.value}",
+                source_url=source_url,
+            )
+            for platform, source_url in (
+                (Platform.bilibili, "https://space.bilibili.com/996"),
+                (
+                    Platform.xiaohongshu,
+                    "https://www.xiaohongshu.com/user/profile/996",
+                ),
+            )
+        ]
+        db.add_all(accounts)
+        db.commit()
+        account_ids = [account.id for account in accounts]
+
+    collector = CollectorService(get_settings())
+    active = 0
+    maximum_active = 0
+
+    async def discover(*_args, **_kwargs):
+        nonlocal active, maximum_active
+        active += 1
+        maximum_active = max(maximum_active, active)
+        await asyncio.sleep(0.02)
+        active -= 1
+        return []
+
+    monkeypatch.setattr(collector.provider, "discover", discover)
+    results = await asyncio.gather(
+        *(collector.poll_account(account_id) for account_id in account_ids)
+    )
+
+    assert maximum_active == 1
+    assert all(result.status == JobStatus.baseline for result in results)
 
 
 @pytest.mark.asyncio

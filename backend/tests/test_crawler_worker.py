@@ -2,6 +2,7 @@ import asyncio
 import base64
 import hashlib
 import json
+import os
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -18,8 +19,25 @@ from crawler.worker import (
     _with_system_browser,
     clear_chromium_singleton_files,
     install_douyin_slider_guard,
+    install_weibo_login_compatibility,
+    install_xhs_verification_monitor,
+    provider_max_concurrency,
     profile_is_in_use,
     write_qr_image,
+)
+from crawler.worker_protocol import (
+    MANUAL_VERIFICATION_CODE,
+    classify_worker_exception,
+    read_worker_request,
+    read_worker_result,
+    safe_exception_diagnostic,
+    write_worker_request,
+    write_worker_result,
+)
+from crawler.upstream_compatibility import verify_upstream_compatibility
+
+PROVIDER_FIXTURES = (
+    Path(__file__).parent / "fixtures" / "provider" / "platform_contracts.json"
 )
 
 
@@ -31,6 +49,41 @@ def test_stale_chromium_singleton_files_are_removed(tmp_path: Path):
     clear_chromium_singleton_files(tmp_path)
 
     assert not any((tmp_path / name).exists() for name in ("SingletonLock", "SingletonCookie", "SingletonSocket"))
+
+
+def test_bilibili_discovery_uses_bounded_configurable_concurrency(monkeypatch):
+    assert provider_max_concurrency("xiaohongshu", "discover") == 1
+    assert provider_max_concurrency("bilibili", "stage") == 1
+    monkeypatch.setenv("BILIBILI_DISCOVERY_CONCURRENCY", "3")
+    assert provider_max_concurrency("bilibili", "discover") == 3
+    monkeypatch.setenv("BILIBILI_DISCOVERY_CONCURRENCY", "99")
+    assert provider_max_concurrency("bilibili", "discover") == 4
+    monkeypatch.setenv("BILIBILI_DISCOVERY_CONCURRENCY", "invalid")
+    assert provider_max_concurrency("bilibili", "discover") == 3
+
+
+def test_startup_cleanup_removes_abandoned_discovery_but_keeps_fresh_stage(
+    tmp_path: Path,
+    monkeypatch,
+):
+    now = 1_800_000_000.0
+    discovery = tmp_path / f"discover-{'a' * 32}"
+    fresh_stage = tmp_path / ("b" * 32)
+    expired_stage = tmp_path / ("c" * 32)
+    unrelated = tmp_path / "import-upload"
+    for path in (discovery, fresh_stage, expired_stage, unrelated):
+        path.mkdir()
+        (path / "marker").write_text("fixture", encoding="utf-8")
+    os.utime(discovery, (now, now))
+    os.utime(fresh_stage, (now, now))
+    os.utime(expired_stage, (now - bridge.STALE_STAGE_AGE_SECONDS - 1,) * 2)
+    monkeypatch.setattr(bridge, "STAGING_ROOT", tmp_path)
+
+    assert bridge.cleanup_stale_staging(now=now) == 2
+    assert not discovery.exists()
+    assert not expired_stage.exists()
+    assert fresh_stage.exists()
+    assert unrelated.exists()
 
 
 def test_qr_read_cannot_downgrade_authenticated_session(tmp_path: Path, monkeypatch):
@@ -63,6 +116,27 @@ def test_qr_is_published_atomically_and_returned_as_non_cacheable_data_url(tmp_p
     assert not list(tmp_path.glob("*.tmp"))
 
 
+def test_session_state_rejects_unknown_status_and_cross_platform_files(
+    tmp_path: Path,
+    monkeypatch,
+):
+    monkeypatch.setattr(bridge, "STATE_ROOT", tmp_path)
+    bridge.state_path("xiaohongshu").write_text(
+        json.dumps(
+            {
+                "platform": "douyin",
+                "status": "authenticated",
+                "message": None,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert bridge.read_state("xiaohongshu")["status"] == "logged_out"
+    with pytest.raises(ValueError, match="Unknown platform session status"):
+        bridge.write_state("xiaohongshu", "trusted_forever")
+
+
 def test_discovery_limit_accepts_recovery_window_up_to_500():
     request = bridge.DiscoverRequest(
         platform="bilibili",
@@ -80,25 +154,71 @@ def test_discovery_limit_accepts_recovery_window_up_to_500():
 
 
 def test_health_checks_the_container_internal_novnc_port(monkeypatch):
-    connections: list[tuple[str, int]] = []
+    commands: list[tuple[str, ...]] = []
 
-    class Connection:
-        def __enter__(self):
-            return self
+    def process_has_command(*parts):
+        commands.append(parts)
+        return True
 
-        def __exit__(self, *_args):
-            return None
-
-    def connect(address, timeout):
-        assert timeout == 0.25
-        connections.append(address)
-        return Connection()
-
-    monkeypatch.setattr(bridge.socket, "create_connection", connect)
+    monkeypatch.setattr(
+        bridge,
+        "process_has_command",
+        process_has_command,
+    )
+    monkeypatch.setattr(
+        bridge,
+        "NOVNC_HTML",
+        SimpleNamespace(is_file=lambda: True),
+    )
+    monkeypatch.setattr(
+        bridge,
+        "X11_SOCKET",
+        SimpleNamespace(exists=lambda: True),
+    )
     monkeypatch.setattr(bridge, "NOVNC_PORT", 17900)
+    monkeypatch.setattr(
+        bridge,
+        "provider_build_metadata",
+        lambda: {
+            "mediacrawler_commit": "d280d22",
+            "xhshow_version": "0.2.0",
+            "xhs_sign_override_sha256": "a" * 64,
+        },
+    )
+    monkeypatch.setattr(
+        bridge,
+        "verify_upstream_compatibility",
+        lambda _root: {
+            "compatible": True,
+            "platforms": {
+                platform: {"compatible": True, "missing": []}
+                for platform in ("xiaohongshu", "douyin", "bilibili", "weibo")
+            },
+        },
+    )
 
-    assert bridge.health()["status"] == "ok"
-    assert connections == [("127.0.0.1", 5900), ("127.0.0.1", 7900)]
+    health = bridge.health()
+    assert health["status"] == "ok"
+    assert health["commit"] == "d280d22"
+    assert health["xhshow_version"] == "0.2.0"
+    assert all(health["platform_compatibility"].values())
+    assert commands == [
+        ("x11vnc", "-rfbport", "5900"),
+        ("websockify", "7900", "127.0.0.1:5900"),
+    ]
+
+
+def test_upstream_compatibility_check_fails_closed_for_missing_tree(tmp_path: Path):
+    result = verify_upstream_compatibility(tmp_path)
+
+    assert result["compatible"] is False
+    assert set(result["platforms"]) == {
+        "xiaohongshu",
+        "douyin",
+        "bilibili",
+        "weibo",
+    }
+    assert all(value["missing"] for value in result["platforms"].values())
 
 
 @pytest.mark.asyncio
@@ -221,6 +341,87 @@ async def test_douyin_slider_guard_waits_for_human_and_rejects_automatic_movemen
 
 
 @pytest.mark.asyncio
+async def test_xhs_secondary_sms_verification_is_published_for_manual_completion(
+    tmp_path: Path,
+):
+    original_finished = asyncio.Event()
+
+    class Body:
+        async def inner_text(self, timeout):
+            assert timeout == 1_000
+            return "为保障账号安全，请使用手机号验证并输入短信验证码"
+
+    class Page:
+        url = "https://www.xiaohongshu.com/verify/"
+
+        def locator(self, selector):
+            assert selector == "body"
+            return Body()
+
+    class FakeXhsLogin:
+        context_page = Page()
+
+        async def check_login_state(self, _session):
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            original_finished.set()
+            return True
+
+    state_path = tmp_path / "xiaohongshu.json"
+    install_xhs_verification_monitor(
+        FakeXhsLogin,
+        state_path=state_path,
+        poll_interval=0,
+    )
+
+    assert await FakeXhsLogin().check_login_state("old-session") is True
+    assert original_finished.is_set()
+    state = json.loads(state_path.read_text("utf-8"))
+    assert state["status"] == "manual_verification_required"
+    assert "短信或安全二次验证" in state["message"]
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+@pytest.mark.asyncio
+async def test_weibo_login_uses_desktop_user_agent_and_rejects_zero_exit():
+    calls: list[tuple] = []
+
+    class FakeCrawler:
+        async def launch_browser(
+            self,
+            chromium,
+            playwright_proxy,
+            user_agent,
+            headless=True,
+        ):
+            calls.append((chromium, playwright_proxy, user_agent, headless))
+            return "context"
+
+    class FakeLogin:
+        async def login_by_qrcode(self):
+            raise SystemExit()
+
+    install_weibo_login_compatibility(
+        FakeCrawler,
+        FakeLogin,
+        desktop_user_agent="desktop-user-agent",
+    )
+
+    context = await FakeCrawler().launch_browser(
+        "chromium",
+        "proxy",
+        "mobile-user-agent",
+        False,
+    )
+    assert context == "context"
+    assert calls == [
+        ("chromium", "proxy", "desktop-user-agent", False),
+    ]
+    with pytest.raises(RuntimeError, match="failed before authentication"):
+        await FakeLogin().login_by_qrcode()
+
+
+@pytest.mark.asyncio
 async def test_slider_guard_failure_becomes_manual_verification_state(tmp_path: Path, monkeypatch):
     class FailedProcess:
         returncode = 1
@@ -234,13 +435,135 @@ async def test_slider_guard_failure_becomes_manual_verification_state(tmp_path: 
     monkeypatch.setattr(bridge, "STATE_ROOT", tmp_path)
     monkeypatch.setitem(bridge.locks, "douyin", lock)
     monkeypatch.setitem(bridge.processes, "douyin", process)
+    write_worker_result(
+        tmp_path / "login-douyin",
+        classify_worker_exception(
+            RuntimeError(SLIDER_MANUAL_VERIFICATION_MESSAGE),
+            "login",
+        ),
+    )
 
     await bridge.finish_login("douyin", process)
 
     state = bridge.read_state("douyin")
     assert state["status"] == "manual_verification_required"
-    assert state["message"] == "请通过本机 noVNC 手动完成滑块验证；系统不会自动处理"
+    assert "noVNC" in state["message"]
     assert lock.locked() is False
+
+
+def test_worker_result_protocol_is_atomic_versioned_and_redacted(tmp_path: Path):
+    result = classify_worker_exception(
+        RuntimeError(
+            "download failed for https://cdn.example.test/video.mp4?signature=secret"
+        ),
+        "staging",
+    )
+
+    destination = write_worker_result(tmp_path, result)
+    loaded = read_worker_result(tmp_path, expected_phase="staging")
+
+    assert destination.name == "bridge-result.json"
+    assert loaded is not None
+    assert loaded["code"] == "provider_execution_failed"
+    assert loaded["retryable"] is True
+    assert "secret" not in loaded["message"]
+    assert "[query-redacted]" in loaded["message"]
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_retry_wrapper_diagnostic_uses_and_redacts_underlying_exception():
+    class RetryWrapper(RuntimeError):
+        def __init__(self):
+            super().__init__("opaque retry wrapper")
+            self.last_attempt = SimpleNamespace(
+                exception=lambda: RuntimeError(
+                    "API failed https://example.invalid/items?token=secret"
+                )
+            )
+
+    diagnostic = safe_exception_diagnostic(RetryWrapper(), "fallback")
+
+    assert diagnostic == (
+        "API failed https://example.invalid/items?[query-redacted]"
+    )
+
+
+def test_worker_request_protocol_keeps_signed_values_in_restricted_job_file(
+    tmp_path: Path,
+):
+    signed_value = "https://www.xiaohongshu.com/user/profile/1?xsec_token=secret"
+    destination = write_worker_request(
+        tmp_path,
+        platform="xiaohongshu",
+        mode="discover",
+        value=signed_value,
+        limit=20,
+    )
+
+    loaded = read_worker_request(
+        tmp_path,
+        expected_platform="xiaohongshu",
+        expected_mode="discover",
+    )
+
+    assert destination.name == "bridge-request.json"
+    assert loaded == {"value": signed_value, "limit": 20}
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+@pytest.mark.asyncio
+async def test_spawn_never_places_signed_source_url_in_process_arguments(
+    tmp_path: Path,
+    monkeypatch,
+):
+    captured: list[str] = []
+
+    class FakeProcess:
+        returncode = None
+
+    async def create_process(*args, **_kwargs):
+        captured.extend(str(value) for value in args)
+        return FakeProcess()
+
+    monkeypatch.setattr(bridge, "STATE_ROOT", tmp_path / "state")
+    monkeypatch.setattr(bridge, "BROWSER_ROOT", tmp_path / "browser")
+    monkeypatch.setattr(
+        bridge.asyncio,
+        "create_subprocess_exec",
+        create_process,
+    )
+    signed_value = (
+        "https://www.xiaohongshu.com/user/profile/1?xsec_token=secret"
+    )
+    output = tmp_path / "job"
+
+    process = await bridge.spawn(
+        "xiaohongshu",
+        "discover",
+        output,
+        signed_value,
+        20,
+    )
+
+    assert isinstance(process, FakeProcess)
+    assert signed_value not in captured
+    assert read_worker_request(
+        output,
+        expected_platform="xiaohongshu",
+        expected_mode="discover",
+    )["value"] == signed_value
+    bridge.active_processes.discard(process)
+
+
+def test_worker_result_classifies_manual_verification_at_worker_boundary():
+    result = classify_worker_exception(
+        RuntimeError("captcha verification is required"),
+        "login",
+    )
+
+    assert result["code"] == MANUAL_VERIFICATION_CODE
+    assert result["phase"] == "login"
+    assert result["retryable"] is True
 
 
 def test_process_error_ignores_playwright_decoration_and_keeps_actionable_failure():
@@ -376,6 +699,48 @@ def test_provider_contract_supplies_canonical_identity_and_explicit_media_slots(
     assert item["source_url"].endswith("/BV1contract")
     assert item["aliases"] == []
     assert metadata["expected_media_count"] == 1
+
+
+@pytest.mark.parametrize(
+    "case",
+    json.loads(PROVIDER_FIXTURES.read_text(encoding="utf-8")),
+    ids=lambda case: case["platform"],
+)
+def test_platform_contract_fixtures_preserve_identity_and_media_semantics(
+    tmp_path: Path,
+    case: dict,
+):
+    (tmp_path / bridge.PROVIDER_CONTRACT_FILENAME).write_text(
+        json.dumps(case["contract"], ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    contract = bridge.provider_contract(
+        tmp_path,
+        expected_platform=case["platform"],
+        expected_mode="stage",
+    )
+    item, metadata = bridge.apply_provider_contract(
+        bridge.normalize(case["platform"], case["raw"]),
+        contract,
+    )
+    expected = case["expected"]
+    media = [
+        {"local_path": slot["staged_path"], "kind": slot["kind"]}
+        for slot in metadata["media_slots"]
+    ]
+    bound, complete = bridge.bind_staged_media_to_slots(media, metadata)
+
+    assert item["remote_id"] == expected["canonical_id"]
+    assert item["aliases"] == expected["aliases"]
+    assert item["original"] is expected["original"]
+    assert item["content_type"] == expected["content_type"]
+    assert [slot["kind"] for slot in metadata["media_slots"]] == expected["slot_kinds"]
+    assert metadata["unsupported_media"] is expected["unsupported_media"]
+    assert complete is True
+    assert [record["slot_id"] for record in bound] == [
+        slot["slot_id"] for slot in metadata["media_slots"]
+    ]
 
 
 def test_provider_contract_alias_matches_legacy_requested_identity():
@@ -649,11 +1014,19 @@ async def test_stage_rejects_media_kind_substitution(tmp_path: Path, monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_short_link_redirect_is_revalidated_before_following(monkeypatch):
+@pytest.mark.parametrize("short_host", ["xhslink.com", "xhslink.cn"])
+async def test_short_link_redirect_is_revalidated_before_following(
+    monkeypatch,
+    short_host,
+):
     requested: list[str] = []
 
     def fake_getaddrinfo(host, port, *_args):
-        address = "93.184.216.34" if host == "xhslink.com" else "127.0.0.1"
+        address = (
+            "93.184.216.34"
+            if host in {"xhslink.com", "xhslink.cn"}
+            else "127.0.0.1"
+        )
         return [(2, 1, 6, "", (address, port))]
 
     class RedirectResponse:
@@ -683,13 +1056,13 @@ async def test_short_link_redirect_is_revalidated_before_following(monkeypatch):
 
     request = bridge.DiscoverRequest(
         platform="xiaohongshu",
-        profile_url="https://xhslink.com/abc",
+        profile_url=f"https://{short_host}/abc",
     )
     with pytest.raises(HTTPException) as caught:
         await bridge.creator_value(request.platform, request.profile_url)
 
     assert caught.value.status_code == 422
-    assert requested == ["https://xhslink.com/abc"]
+    assert requested == [f"https://{short_host}/abc"]
 
 
 @pytest.mark.asyncio
@@ -713,6 +1086,28 @@ async def test_platform_url_rejects_embedded_credentials_before_dns_lookup(monke
     assert caught.value.status_code == 422
     assert "credentials" in caught.value.detail
     assert resolved is False
+
+
+@pytest.mark.asyncio
+async def test_platform_url_accepts_only_known_fake_ip_ranges_when_opted_in(monkeypatch):
+    request = bridge.DiscoverRequest(
+        platform="douyin",
+        profile_url="https://v.douyin.com/abc",
+    )
+
+    def fake_getaddrinfo(_host, port, *_args):
+        return [
+            (2, 1, 6, "", ("198.18.0.25", port)),
+            (10, 1, 6, "", ("fdfe:dcba:9876::10", port)),
+        ]
+
+    monkeypatch.setattr(bridge.socket, "getaddrinfo", fake_getaddrinfo)
+    monkeypatch.setattr(bridge, "ALLOW_FAKE_IP_DNS", False)
+    with pytest.raises(HTTPException, match="Fake-IP"):
+        await bridge.validate_public_platform_url(request.platform, request.profile_url)
+
+    monkeypatch.setattr(bridge, "ALLOW_FAKE_IP_DNS", True)
+    await bridge.validate_public_platform_url(request.platform, request.profile_url)
 
 
 def _fake_package(monkeypatch, name: str, **children: ModuleType) -> ModuleType:
@@ -1272,3 +1667,71 @@ async def test_weibo_discovery_patch_does_not_require_an_initialized_client(monk
 
     assert [card["mblog"]["id"] for card in result] == ["1", "2", "3"]
     assert contract["discovery"]["truncated"] is False
+
+
+@pytest.mark.asyncio
+async def test_weibo_discovery_keeps_newest_pages_when_a_later_page_fails(
+    monkeypatch,
+):
+    store_module = ModuleType("store.weibo")
+
+    async def original(_item):
+        return None
+
+    store_module.update_weibo_note = original
+    _fake_package(monkeypatch, "store", weibo=store_module)
+    monkeypatch.setitem(sys.modules, "store.weibo", store_module)
+
+    class FakeWeiboClient:
+        calls = 0
+
+        async def get_notes_by_creator(self, _creator_id, _container_id, _since_id):
+            self.calls += 1
+            if self.calls == 1:
+                return {
+                    "cards": [
+                        {"card_type": 9, "mblog": {"id": "newest-1"}},
+                        {"card_type": 9, "mblog": {"id": "newest-2"}},
+                    ],
+                    "cardlistInfo": {"since_id": "next"},
+                }
+            raise RuntimeError(
+                "page rejected https://m.weibo.cn/api?token=secret"
+            )
+
+    client_module = ModuleType("media_platform.weibo.client")
+    client_module.WeiboClient = FakeWeiboClient
+    weibo_package = ModuleType("media_platform.weibo")
+    weibo_package.__path__ = []
+    weibo_package.client = client_module
+    _fake_package(monkeypatch, "media_platform", weibo=weibo_package)
+    monkeypatch.setitem(sys.modules, "media_platform.weibo", weibo_package)
+    monkeypatch.setitem(sys.modules, "media_platform.weibo.client", client_module)
+    contract = {"items": {}, "discovery": {}}
+
+    worker.install_provider_contract(
+        SimpleNamespace(platform="weibo", mode="discover"),
+        SimpleNamespace(),
+        SimpleNamespace(CRAWLER_MAX_NOTES_COUNT=500),
+        contract,
+    )
+    result = await FakeWeiboClient().get_all_notes_by_creator_id(
+        "creator",
+        "container",
+        crawl_interval=0,
+    )
+
+    assert [card["mblog"]["id"] for card in result] == [
+        "newest-1",
+        "newest-2",
+    ]
+    assert contract["discovery"] == {
+        "truncated": True,
+        "partial_failure": {
+            "code": "provider_page_failed",
+            "message": (
+                "page rejected "
+                "https://m.weibo.cn/api?[query-redacted]"
+            ),
+        },
+    }

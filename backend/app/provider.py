@@ -15,6 +15,19 @@ from .models import Platform
 class ProviderError(AdapterError):
     code = "provider_error"
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str | None = None,
+        phase: str | None = None,
+        retryable: bool | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = code or type(self).code
+        self.phase = phase
+        self.retryable = retryable
+
 
 class ProviderUnavailableError(ProviderError):
     code = "provider_unavailable"
@@ -95,17 +108,41 @@ class CrawlerProvider:
                 response = await client.request(method, path, **kwargs)
         except httpx.HTTPError as exc:
             raise ProviderUnavailableError("Crawler provider is unavailable") from exc
-        if response.status_code == 401:
-            raise LoginRequiredError("Platform session is not authenticated; scan the QR code or open manual verification")
         if response.status_code >= 400:
             try:
-                detail = str(response.json().get("detail", "Crawler provider request failed"))
+                raw_detail = response.json().get(
+                    "detail", "Crawler provider request failed"
+                )
             except Exception:
-                detail = "Crawler provider request failed"
-            detail = re.sub(r"(https?://[^\s?]+)\?[^\s]+", r"\1?[query-redacted]", detail)[:1000]
+                raw_detail = "Crawler provider request failed"
+            if isinstance(raw_detail, dict):
+                detail = str(raw_detail.get("message") or "Crawler provider request failed")
+                error_code = str(raw_detail.get("code") or "").strip() or None
+                phase = str(raw_detail.get("phase") or "").strip() or None
+                retryable_value = raw_detail.get("retryable")
+                retryable = (
+                    retryable_value if isinstance(retryable_value, bool) else None
+                )
+            else:
+                detail = str(raw_detail)
+                error_code = None
+                phase = None
+                retryable = None
+            detail = re.sub(
+                r"(https?://[^\s?]+)\?[^\s]+",
+                r"\1?[query-redacted]",
+                detail,
+            )[:1000]
+            metadata = {
+                "code": error_code,
+                "phase": phase,
+                "retryable": retryable,
+            }
+            if response.status_code == 401:
+                raise LoginRequiredError(detail, **metadata)
             if response.status_code >= 500:
-                raise ProviderExecutionError(detail)
-            raise ProviderError(detail)
+                raise ProviderExecutionError(detail, **metadata)
+            raise ProviderError(detail, **metadata)
         return response.json() if response.content else None
 
     async def sessions(self) -> list[dict]:

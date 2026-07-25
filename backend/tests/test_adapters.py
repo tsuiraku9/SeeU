@@ -8,6 +8,7 @@ from app.adapters.base import (
     AdapterError,
     ContentRef,
     NonOriginalContentError,
+    PublicPageAdapter,
     StructureChangedError,
     is_challenge_page,
 )
@@ -85,6 +86,7 @@ def test_rejects_cross_platform_url():
         (WeiboAdapter, "https://weibo.com/?uid=123456"),
         (XiaohongshuAdapter, "https://www.xiaohongshu.com/user/profile/abc_123"),
         (XiaohongshuAdapter, "https://xhslink.com/abc123"),
+        (XiaohongshuAdapter, "https://xhslink.cn/m/abc123"),
     ],
 )
 def test_accepts_only_supported_creator_url_shapes(adapter_class, url):
@@ -101,6 +103,7 @@ def test_accepts_only_supported_creator_url_shapes(adapter_class, url):
         (WeiboAdapter, "https://weibo.com/home"),
         (XiaohongshuAdapter, "https://www.xiaohongshu.com/explore/64abcdef"),
         (XiaohongshuAdapter, "https://xhslink.com/"),
+        (XiaohongshuAdapter, "https://xhslink.cn/"),
     ],
 )
 def test_rejects_content_or_unsupported_creator_url_shapes(adapter_class, url):
@@ -140,6 +143,36 @@ async def test_http_rejects_private_dns_before_sending_request(monkeypatch):
     with pytest.raises(AdapterError, match="non-public"):
         await adapter._http_html("https://space.bilibili.com/123")
     assert requested == []
+
+
+@pytest.mark.asyncio
+async def test_http_fake_ip_dns_requires_explicit_opt_in(monkeypatch):
+    blocked = BilibiliAdapter(get_settings())
+    monkeypatch.setattr(
+        blocked, "_resolve_host_addresses", lambda _host, _port: {"198.18.0.25"}
+    )
+    with pytest.raises(AdapterError, match="Fake-IP"):
+        await blocked._validate_public_platform_url("https://space.bilibili.com/123")
+
+    allowed_settings = blocked.settings.model_copy(update={"allow_fake_ip_dns": True})
+    allowed = BilibiliAdapter(allowed_settings)
+    monkeypatch.setattr(
+        allowed,
+        "_resolve_host_addresses",
+        lambda _host, _port: {"198.18.0.25", "fdfe:dcba:9876::10"},
+    )
+    assert (
+        await allowed._validate_public_platform_url(
+            "https://space.bilibili.com/123#fragment"
+        )
+        == "https://space.bilibili.com/123"
+    )
+
+    monkeypatch.setattr(
+        allowed, "_resolve_host_addresses", lambda _host, _port: {"192.168.1.5"}
+    )
+    with pytest.raises(AdapterError, match="non-public"):
+        await allowed._validate_public_platform_url("https://space.bilibili.com/123")
 
 
 @pytest.mark.asyncio
@@ -303,6 +336,52 @@ async def test_browser_fallback_runs_when_http_page_has_no_references(monkeypatc
     monkeypatch.setattr(adapter, "_http_json", original_video)
     refs = await adapter.fetch_latest("https://space.bilibili.com/123")
     assert refs[0].remote_id == "BV1TEST123"
+
+
+def test_bilibili_ytdlp_listing_is_bounded_and_canonical():
+    payload = {
+        "entries": [
+            {"id": "BV1VALID001", "url": "https://example.invalid/ignored"},
+            {"id": "not-a-bvid"},
+            {"id": "BV1VALID001"},
+            *({"id": f"BV1VALID{index:03d}"} for index in range(2, 30)),
+        ]
+    }
+
+    refs = BilibiliAdapter._refs_from_ytdlp_payload(payload)
+
+    assert len(refs) == 20
+    assert refs[0] == ContentRef(
+        "BV1VALID001",
+        "https://www.bilibili.com/video/BV1VALID001",
+    )
+    assert len({ref.remote_id for ref in refs}) == 20
+
+
+@pytest.mark.asyncio
+async def test_bilibili_uses_ytdlp_listing_when_space_html_changes(monkeypatch):
+    adapter = BilibiliAdapter(get_settings())
+    expected = [
+        ContentRef(
+            "BV1FALLBACK",
+            "https://www.bilibili.com/video/BV1FALLBACK",
+        )
+    ]
+
+    async def changed_page(_self, _url):
+        raise StructureChangedError("space page changed")
+
+    async def ytdlp_listing(_url):
+        return expected
+
+    async def original(_ref, *, creator_id=None):
+        assert creator_id == "123"
+
+    monkeypatch.setattr(PublicPageAdapter, "fetch_latest", changed_page)
+    monkeypatch.setattr(adapter, "_fetch_latest_with_ytdlp", ytdlp_listing)
+    monkeypatch.setattr(adapter, "_require_original_video", original)
+
+    assert await adapter.fetch_latest("https://space.bilibili.com/123") == expected
 
 
 @pytest.mark.asyncio

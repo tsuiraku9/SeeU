@@ -13,13 +13,35 @@ import signal
 import socket
 import sys
 import re
-from datetime import datetime, timezone
 from pathlib import Path
 from types import MethodType
 from typing import Any, Awaitable, Callable
 from urllib.parse import urlencode, urljoin, urlparse
 
 import httpx
+
+try:
+    from .contract_validation import PROVIDER_CONTRACT_FILENAME
+    from .network_policy import address_is_allowed, contains_proxy_fake_ip, env_flag
+    from .session_state import write_session_state
+    from .worker_protocol import (
+        WORKER_REQUEST_FILENAME,
+        classify_worker_exception,
+        read_worker_request,
+        safe_exception_diagnostic,
+        write_worker_result,
+    )
+except ImportError:  # Deployed as top-level modules in /bridge.
+    from contract_validation import PROVIDER_CONTRACT_FILENAME
+    from network_policy import address_is_allowed, contains_proxy_fake_ip, env_flag
+    from session_state import write_session_state
+    from worker_protocol import (
+        WORKER_REQUEST_FILENAME,
+        classify_worker_exception,
+        read_worker_request,
+        safe_exception_diagnostic,
+        write_worker_result,
+    )
 
 
 PLATFORM_CONFIG = {
@@ -28,9 +50,9 @@ PLATFORM_CONFIG = {
     "bilibili": ("bili", "BILI_CREATOR_ID_LIST"),
     "weibo": ("wb", "WEIBO_CREATOR_ID_LIST"),
 }
-PROVIDER_CONTRACT_FILENAME = "bridge-contract.json"
 MAX_STAGE_FILES = int(os.getenv("MAX_STAGE_FILES", "100"))
 MAX_STAGE_BYTES = int(os.getenv("MAX_STAGE_BYTES", str(2 * 1024**3)))
+ALLOW_FAKE_IP_DNS = env_flag("ALLOW_FAKE_IP_DNS")
 
 
 def write_qr_image(path: Path, value: str | bytes) -> None:
@@ -108,20 +130,13 @@ async def _reject_automatic_slider(*_args, **_kwargs) -> None:
 
 
 def write_worker_state(path: Path, platform: str, status: str, message: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    value = {
-        "platform": platform,
-        "status": status,
-        "updated_at": datetime.now(timezone.utc).isoformat(),
-        "message": message,
-        "manual_verification_url": NOVNC_URL,
-    }
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    try:
-        temporary.write_text(json.dumps(value, ensure_ascii=False), encoding="utf-8")
-        os.replace(temporary, path)
-    finally:
-        temporary.unlink(missing_ok=True)
+    write_session_state(
+        path,
+        platform=platform,
+        status=status,
+        message=message,
+        manual_verification_url=NOVNC_URL,
+    )
 
 
 def install_douyin_slider_guard(
@@ -178,6 +193,114 @@ def install_douyin_slider_guard(
     login_class.move_slider = _reject_automatic_slider
 
 
+def install_xhs_verification_monitor(
+    login_class: type | None = None,
+    *,
+    state_path: Path,
+    platform: str = "xiaohongshu",
+    poll_interval: float = 1,
+) -> None:
+    """Expose post-QR SMS/security verification while keeping it human-operated."""
+    if login_class is None:
+        from media_platform.xhs.login import XiaoHongShuLogin
+
+        login_class = XiaoHongShuLogin
+
+    original = login_class.check_login_state
+    markers = (
+        "请通过验证",
+        "安全验证",
+        "短信验证码",
+        "请输入验证码",
+        "手机号验证",
+        "使用手机号验证",
+    )
+
+    @functools.wraps(original)
+    async def monitored(self, *args, **kwargs):
+        async def watch_page() -> None:
+            while True:
+                try:
+                    page = self.context_page
+                    body_text = await page.locator("body").inner_text(timeout=1_000)
+                    path = urlparse(str(page.url or "")).path.lower()
+                    if (
+                        any(marker in body_text for marker in markers)
+                        or any(
+                            token in path
+                            for token in ("/captcha/", "/verify/", "/verifycenter/")
+                        )
+                    ):
+                        write_worker_state(
+                            state_path,
+                            platform,
+                            "manual_verification_required",
+                            "小红书要求短信或安全二次验证；请打开本机 noVNC，在平台页面中人工完成",
+                        )
+                        return
+                except Exception:
+                    # Navigation and DOM replacement are expected during QR login.
+                    pass
+                await asyncio.sleep(poll_interval)
+
+        monitor = asyncio.create_task(watch_page())
+        try:
+            return await original(self, *args, **kwargs)
+        finally:
+            monitor.cancel()
+            await asyncio.gather(monitor, return_exceptions=True)
+
+    login_class.check_login_state = monitored
+
+
+def install_weibo_login_compatibility(
+    crawler_class: type | None = None,
+    login_class: type | None = None,
+    *,
+    desktop_user_agent: str | None = None,
+) -> None:
+    """Use the desktop SSO page and turn upstream ``sys.exit(0)`` into failure."""
+    if crawler_class is None or login_class is None or desktop_user_agent is None:
+        from media_platform.weibo.core import WeiboCrawler
+        from media_platform.weibo.login import WeiboLogin
+        from tools import utils
+
+        crawler_class = crawler_class or WeiboCrawler
+        login_class = login_class or WeiboLogin
+        desktop_user_agent = desktop_user_agent or utils.get_user_agent()
+
+    original_launch = crawler_class.launch_browser
+    original_qr_login = login_class.login_by_qrcode
+
+    @functools.wraps(original_launch)
+    async def launch_browser(
+        self,
+        chromium,
+        playwright_proxy,
+        _user_agent,
+        headless=True,
+    ):
+        return await original_launch(
+            self,
+            chromium,
+            playwright_proxy,
+            desktop_user_agent,
+            headless,
+        )
+
+    @functools.wraps(original_qr_login)
+    async def login_by_qrcode(self, *args, **kwargs):
+        try:
+            return await original_qr_login(self, *args, **kwargs)
+        except SystemExit as exc:
+            raise RuntimeError(
+                "Weibo QR login failed before authentication"
+            ) from exc
+
+    crawler_class.launch_browser = launch_browser
+    login_class.login_by_qrcode = login_by_qrcode
+
+
 def profile_is_in_use(profile: Path) -> bool:
     marker = str(profile).encode()
     for cmdline in Path("/proc").glob("[0-9]*/cmdline"):
@@ -231,6 +354,17 @@ def _enabled_flag(value: Any) -> bool:
     if isinstance(value, str):
         return value.strip().lower() in {"1", "true", "yes", "on"}
     return False
+
+
+def provider_max_concurrency(platform: str, mode: str) -> int:
+    """Use bounded parallel detail lookups only for large Bilibili discovery."""
+    if platform != "bilibili" or mode != "discover":
+        return 1
+    try:
+        configured = int(os.getenv("BILIBILI_DISCOVERY_CONCURRENCY", "3"))
+    except ValueError:
+        configured = 3
+    return max(1, min(configured, 4))
 
 
 def _write_provider_contract(output: Path, contract: dict[str, Any]) -> None:
@@ -364,7 +498,20 @@ async def _validate_public_media_url(value: str) -> None:
     resolved = {
         ipaddress.ip_address(record[4][0].split("%", 1)[0]) for record in addresses
     }
-    if not resolved or any(not address.is_global for address in resolved):
+    if (
+        not ALLOW_FAKE_IP_DNS
+        and contains_proxy_fake_ip(resolved)
+    ):
+        raise ValueError(
+            "Provider media URL resolved to a Clash/Mihomo Fake-IP; set "
+            "ALLOW_FAKE_IP_DNS=true only when that proxy DNS mode is intentional"
+        )
+    if not resolved or any(
+        not address_is_allowed(
+            address, allow_fake_ip_dns=ALLOW_FAKE_IP_DNS
+        )
+        for address in resolved
+    ):
         raise ValueError("Provider media URL resolves to a non-public address")
 
 
@@ -1098,9 +1245,24 @@ def install_provider_contract(args, crawler, config, contract: dict[str, Any]) -
                 seen_cursors: set[str] = set()
                 truncated = False
                 while len(result) < config.CRAWLER_MAX_NOTES_COUNT:
-                    response = await client_self.get_notes_by_creator(
-                        creator_id, container_id, since_id
-                    )
+                    try:
+                        response = await client_self.get_notes_by_creator(
+                            creator_id, container_id, since_id
+                        )
+                    except Exception as exc:
+                        if not result:
+                            raise
+                        truncated = True
+                        contract.setdefault("discovery", {})[
+                            "partial_failure"
+                        ] = {
+                            "code": "provider_page_failed",
+                            "message": safe_exception_diagnostic(
+                                exc,
+                                "A later Weibo creator page failed",
+                            ),
+                        }
+                        break
                     if not isinstance(response, dict) or not isinstance(
                         response.get("cards"), list
                     ):
@@ -1155,6 +1317,13 @@ async def run(args) -> None:
             platform=args.platform,
             timeout_seconds=float(os.getenv("MANUAL_VERIFICATION_TIMEOUT_SECONDS", "480")),
         )
+    elif args.platform == "xiaohongshu":
+        install_xhs_verification_monitor(
+            state_path=Path(args.state),
+            platform=args.platform,
+        )
+    elif args.platform == "weibo":
+        install_weibo_login_compatibility()
     config.PLATFORM = upstream
     config.LOGIN_TYPE = "qrcode"
     config.CRAWLER_TYPE = "creator" if args.mode in {"login", "discover"} else "detail"
@@ -1178,7 +1347,10 @@ async def run(args) -> None:
     config.ENABLE_GET_COMMENTS = False
     config.ENABLE_GET_SUB_COMMENTS = False
     config.ENABLE_GET_WORDCLOUD = False
-    config.MAX_CONCURRENCY_NUM = 1
+    config.MAX_CONCURRENCY_NUM = provider_max_concurrency(
+        args.platform,
+        args.mode,
+    )
     config.CRAWLER_MAX_NOTES_COUNT = max(1, min(args.limit, 500))
     config.CRAWLER_MAX_SLEEP_SEC = 2
     setattr(config, creator_key, [] if args.mode == "login" else [args.value])
@@ -1208,6 +1380,17 @@ async def run(args) -> None:
 
 
 async def run_with_signal_cleanup(args) -> None:
+    request_path = Path(args.output) / WORKER_REQUEST_FILENAME
+    try:
+        request = read_worker_request(
+            Path(args.output),
+            expected_platform=args.platform,
+            expected_mode=args.mode,
+        )
+    finally:
+        request_path.unlink(missing_ok=True)
+    args.value = request["value"]
+    args.limit = request["limit"]
     task = asyncio.create_task(run(args))
     loop = asyncio.get_running_loop()
     installed_signals = []
@@ -1226,6 +1409,22 @@ async def run_with_signal_cleanup(args) -> None:
         # close Playwright before the bridge escalates to killing the process
         # group after its grace period.
         pass
+    except Exception as exc:
+        phase = {
+            "login": "login",
+            "discover": "discovery",
+            "stage": "staging",
+        }[args.mode]
+        try:
+            write_worker_result(
+                Path(args.output),
+                classify_worker_exception(exc, phase),
+            )
+        except OSError:
+            # The original traceback remains the diagnostic fallback when the
+            # staging filesystem itself is unavailable.
+            pass
+        raise
     finally:
         for signal_value in installed_signals:
             loop.remove_signal_handler(signal_value)
@@ -1235,10 +1434,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("mode", choices=["login", "discover", "stage"])
     parser.add_argument("platform", choices=list(PLATFORM_CONFIG))
-    parser.add_argument("--value", default="")
     parser.add_argument("--output", required=True)
     parser.add_argument("--qr", required=True)
     parser.add_argument("--browser-root", required=True)
     parser.add_argument("--state", required=True)
-    parser.add_argument("--limit", type=int, default=20)
     asyncio.run(run_with_signal_cleanup(parser.parse_args()))

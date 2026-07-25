@@ -8,6 +8,49 @@ from app.provider import CrawlerProvider, ProviderExecutionError
 
 
 @pytest.mark.asyncio
+async def test_request_preserves_structured_bridge_error_metadata(monkeypatch):
+    class FakeResponse:
+        status_code = 502
+        content = b'{"detail": {}}'
+
+        @staticmethod
+        def json():
+            return {
+                "detail": {
+                    "code": "provider_contract_invalid",
+                    "message": "Provider contract is incomplete",
+                    "phase": "discovery",
+                    "retryable": False,
+                }
+            }
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def request(self, *_args, **_kwargs):
+            return FakeResponse()
+
+    monkeypatch.setattr(
+        "app.provider.httpx.AsyncClient",
+        lambda **_kwargs: FakeClient(),
+    )
+    provider = CrawlerProvider(
+        get_settings().model_copy(update={"crawler_provider_enabled": True})
+    )
+
+    with pytest.raises(ProviderExecutionError) as caught:
+        await provider._request("POST", "/v1/creators/discover")
+
+    assert caught.value.code == "provider_contract_invalid"
+    assert caught.value.phase == "discovery"
+    assert caught.value.retryable is False
+
+
+@pytest.mark.asyncio
 async def test_discovery_orders_complete_publication_times_newest_first(monkeypatch):
     provider = CrawlerProvider(get_settings())
 

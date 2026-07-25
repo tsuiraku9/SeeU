@@ -10,7 +10,9 @@ import pytest
 
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
+REPOSITORY_ROOT = BACKEND_ROOT.parent
 sys.path.insert(0, str(BACKEND_ROOT))
+sys.path.insert(0, str(REPOSITORY_ROOT))
 TEST_ROOT = Path(tempfile.mkdtemp(prefix="public-archive-tests-"))
 os.environ["WEBUI_LOGIN_TOKEN"] = "test-webui-login-token-long-enough-123456"
 os.environ["WEBUI_PORT"] = "8080"

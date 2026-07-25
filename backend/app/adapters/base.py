@@ -29,6 +29,10 @@ MAX_HTML_RESPONSE_BYTES = 8 * 1024 * 1024
 MAX_JSON_RESPONSE_BYTES = 4 * 1024 * 1024
 MAX_REDIRECTS = 5
 REDIRECT_STATUSES = {301, 302, 303, 307, 308}
+PROXY_FAKE_IP_NETWORKS = (
+    ipaddress.ip_network("198.18.0.0/15"),
+    ipaddress.ip_network("fdfe:dcba:9876::/48"),
+)
 
 
 class AdapterError(RuntimeError):
@@ -194,6 +198,15 @@ class PublicPageAdapter(ABC):
             raise AdapterError("Platform URL resolves to a non-public address")
         return parsed, host, port
 
+    def _address_is_allowed(
+        self, address: ipaddress.IPv4Address | ipaddress.IPv6Address
+    ) -> bool:
+        if address.is_global:
+            return True
+        return self.settings.allow_fake_ip_dns and any(
+            address in network for network in PROXY_FAKE_IP_NETWORKS
+        )
+
     @staticmethod
     def _resolve_host_addresses(host: str, port: int) -> set[str]:
         results = socket.getaddrinfo(
@@ -217,7 +230,18 @@ class PublicPageAdapter(ABC):
             parsed_addresses = [ipaddress.ip_address(address) for address in addresses]
         except ValueError as exc:
             raise AdapterError(f"Platform hostname returned an invalid address: {host}") from exc
-        if any(not address.is_global for address in parsed_addresses):
+        if (
+            not self.settings.allow_fake_ip_dns
+            and any(
+                any(address in network for network in PROXY_FAKE_IP_NETWORKS)
+                for address in parsed_addresses
+            )
+        ):
+            raise AdapterError(
+                "Platform hostname resolved to a Clash/Mihomo Fake-IP; set "
+                "ALLOW_FAKE_IP_DNS=true only when that proxy DNS mode is intentional"
+            )
+        if any(not self._address_is_allowed(address) for address in parsed_addresses):
             raise AdapterError(f"Platform hostname resolved to a non-public address: {host}")
         return parsed._replace(fragment="").geturl()
 

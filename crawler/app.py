@@ -14,7 +14,7 @@ import sys
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Literal
 from urllib.parse import parse_qs, urljoin, urlparse
 
@@ -22,6 +22,53 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, HttpUrl
 import httpx
+
+try:
+    from .contract_validation import (
+        PROVIDER_CONTRACT_FILENAME,
+        apply_provider_contract,
+        bind_staged_media_to_slots,
+        contract_identity_matches,
+        provider_contract,
+    )
+    from .network_policy import address_is_allowed, contains_proxy_fake_ip, env_flag
+    from .session_state import (
+        read_session_state,
+        session_qr_path,
+        session_state_path,
+        write_session_state,
+    )
+    from .upstream_compatibility import verify_upstream_compatibility
+    from .worker_protocol import (
+        LOGIN_REQUIRED_CODE,
+        MANUAL_VERIFICATION_CODE,
+        PROVIDER_EXECUTION_CODE,
+        read_worker_result,
+        write_worker_request,
+    )
+except ImportError:  # Deployed as top-level modules in /bridge.
+    from contract_validation import (
+        PROVIDER_CONTRACT_FILENAME,
+        apply_provider_contract,
+        bind_staged_media_to_slots,
+        contract_identity_matches,
+        provider_contract,
+    )
+    from network_policy import address_is_allowed, contains_proxy_fake_ip, env_flag
+    from session_state import (
+        read_session_state,
+        session_qr_path,
+        session_state_path,
+        write_session_state,
+    )
+    from upstream_compatibility import verify_upstream_compatibility
+    from worker_protocol import (
+        LOGIN_REQUIRED_CODE,
+        MANUAL_VERIFICATION_CODE,
+        PROVIDER_EXECUTION_CODE,
+        read_worker_result,
+        write_worker_request,
+    )
 
 
 PLATFORMS = ("bilibili", "weibo", "douyin", "xiaohongshu")
@@ -49,9 +96,18 @@ NOVNC_URL = f"http://{NOVNC_URL_HOST}:{NOVNC_PORT}/vnc.html?autoconnect=1&resize
 # websockify always listens on this container-internal port; NOVNC_PORT is the
 # independently configurable host-published port shown to the administrator.
 INTERNAL_NOVNC_PORT = 7900
-PROVIDER_CONTRACT_FILENAME = "bridge-contract.json"
+NOVNC_HTML = Path("/usr/share/novnc/vnc.html")
+X11_SOCKET = Path("/tmp/.X11-unix/X99")
+PROVIDER_BUILD_METADATA = Path(
+    os.getenv(
+        "PROVIDER_BUILD_METADATA",
+        "/opt/MediaCrawler/.bridge-build.json",
+    )
+)
+MEDIACRAWLER_ROOT = Path(os.getenv("MEDIACRAWLER_ROOT", "/opt/MediaCrawler"))
+ALLOW_FAKE_IP_DNS = env_flag("ALLOW_FAKE_IP_DNS")
 ALLOWED_HOSTS = {
-    "xiaohongshu": ("xiaohongshu.com", "xhslink.com"),
+    "xiaohongshu": ("xiaohongshu.com", "xhslink.com", "xhslink.cn"),
     "douyin": ("douyin.com", "iesdouyin.com"), "bilibili": ("bilibili.com", "b23.tv"),
     "weibo": ("weibo.com", "weibo.cn"),
 }
@@ -65,6 +121,35 @@ class StageResourceLimitError(RuntimeError):
     def __init__(self, message: str, status_code: int) -> None:
         super().__init__(message)
         self.status_code = status_code
+
+
+def bridge_error(
+    status_code: int,
+    code: str,
+    message: str,
+    *,
+    phase: str,
+    retryable: bool,
+) -> HTTPException:
+    return HTTPException(
+        status_code,
+        {
+            "code": code,
+            "message": message,
+            "phase": phase,
+            "retryable": retryable,
+        },
+    )
+
+
+def contract_error(message: str, phase: str) -> HTTPException:
+    return bridge_error(
+        502,
+        "provider_contract_invalid",
+        message,
+        phase=phase,
+        retryable=False,
+    )
 
 
 class DiscoverRequest(BaseModel):
@@ -97,12 +182,52 @@ async def lifespan(_app: FastAPI):
 app = FastAPI(title="MediaCrawler bridge", version="1.0.0", lifespan=lifespan)
 
 
-def state_path(platform: str) -> Path: return STATE_ROOT / f"{platform}.json"
-def qr_path(platform: str) -> Path: return STATE_ROOT / f"{platform}-qr.png"
+def state_path(platform: str) -> Path:
+    return session_state_path(STATE_ROOT, platform)
+
+
+def qr_path(platform: str) -> Path:
+    return session_qr_path(STATE_ROOT, platform)
+
+
+def provider_build_metadata() -> dict[str, str]:
+    defaults = {
+        "mediacrawler_commit": "unknown",
+        "xhshow_version": "unknown",
+        "xhs_sign_override_sha256": "unknown",
+    }
+    try:
+        value = json.loads(PROVIDER_BUILD_METADATA.read_text("utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return defaults
+    if not isinstance(value, dict):
+        return defaults
+    return {
+        key: str(value.get(key) or default)
+        for key, default in defaults.items()
+    }
+
+
+def process_has_command(*expected_parts: str) -> bool:
+    for command_path in Path("/proc").glob("[0-9]*/cmdline"):
+        try:
+            command = command_path.read_bytes().replace(b"\0", b" ").decode(
+                "utf-8", errors="replace"
+            )
+        except OSError:
+            continue
+        if all(part in command for part in expected_parts):
+            return True
+    return False
 
 
 def cleanup_stale_staging(now: float | None = None) -> int:
-    """Remove only expired bridge-owned jobs; imports use a different prefix."""
+    """Remove abandoned discovery jobs and expired staged-content jobs.
+
+    Discovery directories have no consumer after the bridge process restarts,
+    while a completed staging directory may still be copied by the main service
+    and therefore keeps the normal TTL.
+    """
     current_time = datetime.now(timezone.utc).timestamp() if now is None else now
     removed = 0
     for candidate in STAGING_ROOT.iterdir():
@@ -111,7 +236,10 @@ def cleanup_stale_staging(now: float | None = None) -> int:
         ):
             continue
         try:
-            expired = current_time - candidate.stat().st_mtime >= STALE_STAGE_AGE_SECONDS
+            expired = candidate.name.startswith("discover-") or (
+                current_time - candidate.stat().st_mtime
+                >= STALE_STAGE_AGE_SECONDS
+            )
         except OSError:
             continue
         if expired:
@@ -122,26 +250,21 @@ def cleanup_stale_staging(now: float | None = None) -> int:
 
 
 def read_state(platform: str) -> dict:
-    default = {"platform": platform, "status": "logged_out", "updated_at": None, "message": None,
-               "manual_verification_url": NOVNC_URL}
-    try:
-        return {**default, **json.loads(state_path(platform).read_text("utf-8")), "manual_verification_url": NOVNC_URL}
-    except (OSError, json.JSONDecodeError):
-        return default
+    return read_session_state(
+        state_path(platform),
+        platform=platform,
+        manual_verification_url=NOVNC_URL,
+    )
 
 
 def write_state(platform: str, status: str, message: str | None = None) -> dict:
-    STATE_ROOT.mkdir(parents=True, exist_ok=True)
-    value = {"platform": platform, "status": status, "updated_at": datetime.now(timezone.utc).isoformat(),
-             "message": message, "manual_verification_url": NOVNC_URL}
-    destination = state_path(platform)
-    temporary = destination.with_name(f".{destination.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
-    try:
-        temporary.write_text(json.dumps(value, ensure_ascii=False), "utf-8")
-        os.replace(temporary, destination)
-    finally:
-        temporary.unlink(missing_ok=True)
-    return value
+    return write_session_state(
+        state_path(platform),
+        platform=platform,
+        status=status,
+        message=message,
+        manual_verification_url=NOVNC_URL,
+    )
 
 
 def refresh_session_state(platform: str) -> dict:
@@ -161,12 +284,18 @@ async def spawn(
 ) -> asyncio.subprocess.Process:
     output.mkdir(parents=True, exist_ok=True)
     qr_path(platform).unlink(missing_ok=True)
+    write_worker_request(
+        output,
+        platform=platform,
+        mode=mode,
+        value=value,
+        limit=max(1, min(limit, 500)),
+    )
     process = await asyncio.create_subprocess_exec(
-        sys.executable, "/bridge/worker.py", mode, platform, "--value", value,
+        sys.executable, "/bridge/worker.py", mode, platform,
         "--output", str(output), "--qr", str(qr_path(platform)),
         "--browser-root", str(BROWSER_ROOT), "--state", str(state_path(platform)),
-        "--limit", str(max(1, min(limit, 500))), stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
         start_new_session=os.name == "posix",
     )
     active_processes.add(process)
@@ -230,12 +359,10 @@ async def monitor_stage_resources(
                 "Unable to inspect provider staging disk capacity", 507
             ) from exc
         if total_bytes > max_bytes:
-            await stop_process(process)
             raise StageResourceLimitError(
                 f"Provider staging exceeded the {max_bytes}-byte limit", 413
             )
         if free_bytes < min_free_bytes:
-            await stop_process(process)
             raise StageResourceLimitError(
                 "Provider staging stopped because free disk space is below the safety reserve",
                 507,
@@ -288,6 +415,9 @@ async def communicate(
     except asyncio.TimeoutError:
         await stop_process(process)
         raise
+    except StageResourceLimitError:
+        await stop_process(process)
+        raise
     except asyncio.CancelledError:
         await stop_process(process)
         raise
@@ -304,6 +434,7 @@ async def communicate(
 
 
 async def finish_login(platform: str, process: asyncio.subprocess.Process) -> None:
+    output_root = STATE_ROOT / f"login-{platform}"
     try:
         try:
             output, _ = await communicate(process, LOGIN_TIMEOUT_SECONDS)
@@ -319,27 +450,27 @@ async def finish_login(platform: str, process: asyncio.subprocess.Process) -> No
         # process must not overwrite it with "expired" after cleanup.
         if processes.get(platform) is not process:
             return
-        text = output.decode("utf-8", "replace")[-1000:]
-        lowered = text.lower()
         if process.returncode == 0:
             qr_path(platform).unlink(missing_ok=True)
             write_state(platform, "authenticated")
-        elif "slider" in lowered:
+            return
+        failure = worker_failure(output_root, output, "login")
+        if failure["code"] == MANUAL_VERIFICATION_CODE:
             write_state(
                 platform,
                 "manual_verification_required",
-                "请通过本机 noVNC 手动完成滑块验证；系统不会自动处理",
+                failure["message"],
             )
-        elif any(word in lowered for word in ("captcha", "verify", "verification")):
-            write_state(platform, "manual_verification_required", "平台要求额外的人工验证")
+        elif failure["code"] == LOGIN_REQUIRED_CODE:
+            write_state(platform, "expired", failure["message"])
         else:
             write_state(
                 platform,
                 "expired" if qr_path(platform).exists() else "error",
-                safe_process_error(output, "Login did not complete"),
+                failure["message"],
             )
     finally:
-        shutil.rmtree(STATE_ROOT / f"login-{platform}", ignore_errors=True)
+        shutil.rmtree(output_root, ignore_errors=True)
         if processes.get(platform) is process:
             processes.pop(platform, None)
         if locks[platform].locked():
@@ -395,98 +526,6 @@ MEDIA_MIME_BY_SUFFIX = {
 }
 
 
-def provider_contract(
-    root: Path,
-    *,
-    expected_platform: str | None = None,
-    expected_mode: str | None = None,
-) -> dict:
-    path = root / PROVIDER_CONTRACT_FILENAME
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise ValueError("Pinned provider did not produce its bridge contract") from exc
-    if payload.get("schema_version") != 1 or not isinstance(payload.get("items"), dict):
-        raise ValueError("Pinned provider bridge contract has an unknown structure")
-    if expected_platform is not None and payload.get("platform") != expected_platform:
-        raise ValueError("Pinned provider bridge contract platform does not match the job")
-    if expected_mode is not None and payload.get("mode") != expected_mode:
-        raise ValueError("Pinned provider bridge contract mode does not match the job")
-    return payload
-
-
-def apply_provider_contract(item: dict, contract: dict) -> tuple[dict, dict]:
-    provider_id = str(item.get("remote_id") or "")
-    metadata = contract["items"].get(provider_id)
-    if not isinstance(metadata, dict):
-        raise ValueError(f"Provider contract is missing content {provider_id or '<unknown>'}")
-    canonical_id = str(metadata.get("canonical_id") or "").strip()
-    source_url = str(metadata.get("source_url") or "").strip()
-    if not canonical_id or not source_url:
-        raise ValueError("Provider contract is missing canonical content identity")
-    slots = metadata.get("media_slots")
-    if not isinstance(slots, list):
-        raise ValueError("Provider contract contains invalid media slots")
-    slot_ids: set[str] = set()
-    staged_paths: set[str] = set()
-    for ordinal, slot in enumerate(slots, start=1):
-        if not isinstance(slot, dict):
-            raise ValueError("Provider contract contains invalid media slots")
-        slot_id = str(slot.get("slot_id") or "")
-        source_sha256 = slot.get("source_sha256")
-        staged_path = slot.get("staged_path")
-        if (
-            slot.get("kind") not in {"image", "video", "audio"}
-            or slot.get("ordinal") != ordinal
-            or not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,127}", slot_id)
-            or slot_id in slot_ids
-            or (
-                source_sha256 is not None
-                and not re.fullmatch(r"[0-9a-f]{64}", str(source_sha256))
-            )
-        ):
-            raise ValueError("Provider contract contains invalid media slots")
-        slot_ids.add(slot_id)
-        if staged_path is not None:
-            path_value = str(staged_path)
-            relative = PurePosixPath(path_value)
-            if (
-                not path_value
-                or "\\" in path_value
-                or relative.is_absolute()
-                or ".." in relative.parts
-                or relative.as_posix() != path_value
-                or path_value.casefold() in staged_paths
-            ):
-                raise ValueError("Provider contract contains invalid staged media paths")
-            staged_paths.add(path_value.casefold())
-    expected = int(metadata.get("expected_media_count", -1))
-    if expected < 0 or expected != len(slots):
-        raise ValueError("Provider contract media count does not match its slots")
-    aliases = metadata.get("aliases", [])
-    if not isinstance(aliases, list) or any(
-        not isinstance(alias, str) or not alias.strip() for alias in aliases
-    ):
-        raise ValueError("Provider contract contains invalid content aliases")
-    item.update(
-        {
-            "remote_id": canonical_id,
-            "source_url": source_url,
-            "original": metadata.get("original") is True,
-            "pinned": metadata.get("pinned") is True,
-            "content_type": str(
-                metadata.get("content_type") or item.get("content_type") or "unknown"
-            ),
-            "aliases": list(dict.fromkeys(alias.strip() for alias in aliases)),
-        }
-    )
-    return item, metadata
-
-
-def contract_identity_matches(requested_id: str, item: dict) -> bool:
-    return requested_id == item.get("remote_id") or requested_id in item.get("aliases", [])
-
-
 def sha256_file(path: Path, chunk_size: int = 1024 * 1024) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as source:
@@ -533,36 +572,6 @@ def staged_media(job: Path) -> tuple[list[dict], int, int]:
     return media, len(recognized), invalid_count + len(data_files) - len(recognized)
 
 
-def bind_staged_media_to_slots(
-    media: list[dict], item_contract: dict
-) -> tuple[list[dict], bool]:
-    """Return media in contract-slot order only when every file binds exactly once."""
-    slots = item_contract.get("media_slots") or []
-    media_by_path = {
-        str(record.get("local_path") or "").casefold(): record for record in media
-    }
-    if len(media_by_path) != len(media):
-        return [], False
-    bound: list[dict] = []
-    bound_paths: set[str] = set()
-    for slot in slots:
-        staged_path = str(slot.get("staged_path") or "")
-        path_key = staged_path.casefold()
-        record = media_by_path.get(path_key)
-        if (
-            not staged_path
-            or path_key in bound_paths
-            or record is None
-            or record.get("kind") != slot.get("kind")
-        ):
-            return [], False
-        bound_paths.add(path_key)
-        bound.append({**record, "slot_id": slot["slot_id"]})
-    if bound_paths != set(media_by_path):
-        return [], False
-    return bound, True
-
-
 def safe_process_error(output: bytes, fallback: str) -> str:
     text = output.decode("utf-8", "replace")
     text = re.sub(r"(https?://[^\s?]+)\?[^\s]+", r"\1?[query-redacted]", text)
@@ -578,6 +587,50 @@ def safe_process_error(output: bytes, fallback: str) -> str:
         if re.search(r"error|exception|failed|timeout|doesn't exist|not found", line, re.IGNORECASE)
     ]
     return ((diagnostic[-1] if diagnostic else meaningful[-1]) if meaningful else fallback)[:1000]
+
+
+def worker_failure(root: Path, output: bytes, phase: str) -> dict:
+    try:
+        result = read_worker_result(root, expected_phase=phase)
+    except ValueError as exc:
+        return {
+            "code": "worker_result_invalid",
+            "message": str(exc),
+            "phase": phase,
+            "retryable": False,
+        }
+    if result is not None:
+        return result
+    return {
+        "code": PROVIDER_EXECUTION_CODE,
+        "message": safe_process_error(output, "Provider worker failed"),
+        "phase": phase,
+        "retryable": True,
+    }
+
+
+def raise_worker_failure(
+    platform: str,
+    root: Path,
+    output: bytes,
+    phase: str,
+) -> None:
+    failure = worker_failure(root, output, phase)
+    if failure["code"] == MANUAL_VERIFICATION_CODE:
+        write_state(platform, "manual_verification_required", failure["message"])
+        status_code = 401
+    elif failure["code"] == LOGIN_REQUIRED_CODE:
+        write_state(platform, "expired", failure["message"])
+        status_code = 401
+    else:
+        status_code = 502
+    raise bridge_error(
+        status_code,
+        failure["code"],
+        failure["message"],
+        phase=failure["phase"],
+        retryable=failure["retryable"],
+    )
 
 
 def validate_platform_url(platform: str, value: HttpUrl) -> None:
@@ -601,7 +654,19 @@ async def validate_public_platform_url(platform: str, value) -> None:
         }
     except (OSError, ValueError) as exc:
         raise HTTPException(422, "Platform URL host could not be resolved") from exc
-    if not resolved or any(not address.is_global for address in resolved):
+    if (
+        not ALLOW_FAKE_IP_DNS
+        and contains_proxy_fake_ip(resolved)
+    ):
+        raise HTTPException(
+            422,
+            "Platform URL resolved to a Clash/Mihomo Fake-IP; set "
+            "ALLOW_FAKE_IP_DNS=true only when that proxy DNS mode is intentional",
+        )
+    if not resolved or any(
+        not address_is_allowed(address, allow_fake_ip_dns=ALLOW_FAKE_IP_DNS)
+        for address in resolved
+    ):
         raise HTTPException(422, "Platform URL resolves to a non-public address")
 
 
@@ -609,13 +674,15 @@ async def creator_value(platform: str, value: HttpUrl) -> str:
     await validate_public_platform_url(platform, value)
     url = str(value)
     short_hosts = {
-        "xiaohongshu": "xhslink.com",
-        "douyin": "v.douyin.com",
-        "bilibili": "b23.tv",
+        "xiaohongshu": ("xhslink.com", "xhslink.cn"),
+        "douyin": ("v.douyin.com",),
+        "bilibili": ("b23.tv",),
     }
-    if short_hosts.get(platform) and (
-        value.host == short_hosts[platform]
-        or str(value.host or "").endswith("." + short_hosts[platform])
+    platform_short_hosts = short_hosts.get(platform, ())
+    if any(
+        value.host == domain
+        or str(value.host or "").endswith("." + domain)
+        for domain in platform_short_hosts
     ):
         async with httpx.AsyncClient(
             follow_redirects=False,
@@ -661,22 +728,52 @@ async def creator_value(platform: str, value: HttpUrl) -> str:
 
 @app.get("/v1/health")
 def health():
-    try:
-        with socket.create_connection(("127.0.0.1", 5900), timeout=0.25):
-            desktop = "ok"
-        with socket.create_connection(("127.0.0.1", INTERNAL_NOVNC_PORT), timeout=0.25):
-            websocket_proxy = "ok"
-    except OSError:
-        desktop = "unavailable"
-        websocket_proxy = "unavailable"
+    desktop = (
+        "ok"
+        if X11_SOCKET.exists()
+        and process_has_command("x11vnc", "-rfbport", "5900")
+        else "unavailable"
+    )
+    websocket_proxy = (
+        "ok"
+        if NOVNC_HTML.is_file()
+        and process_has_command(
+            "websockify",
+            str(INTERNAL_NOVNC_PORT),
+            "127.0.0.1:5900",
+        )
+        else "unavailable"
+    )
+    compatibility = verify_upstream_compatibility(MEDIACRAWLER_ROOT)
     if desktop != "ok" or websocket_proxy != "ok":
         raise HTTPException(503, "Interactive browser desktop is unavailable")
+    if not compatibility["compatible"]:
+        missing = [
+            item
+            for value in compatibility["platforms"].values()
+            for item in value["missing"]
+        ]
+        raise bridge_error(
+            503,
+            "upstream_incompatible",
+            "Pinned MediaCrawler compatibility check failed: " + ", ".join(missing),
+            phase="startup",
+            retryable=False,
+        )
+    build = provider_build_metadata()
     return {
         "status": "ok",
         "upstream": "MediaCrawler",
-        "commit": "d280d22",
+        "commit": build["mediacrawler_commit"],
+        "xhshow_version": build["xhshow_version"],
+        "xhs_sign_override_sha256": build["xhs_sign_override_sha256"],
         "desktop": desktop,
         "websocket_proxy": websocket_proxy,
+        "fake_ip_dns_enabled": ALLOW_FAKE_IP_DNS,
+        "platform_compatibility": {
+            platform: value["compatible"]
+            for platform, value in compatibility["platforms"].items()
+        },
     }
 
 
@@ -750,7 +847,14 @@ async def logout(platform: str):
 
 
 async def require_session(platform: str) -> None:
-    if read_state(platform)["status"] != "authenticated": raise HTTPException(401, "login_required")
+    if read_state(platform)["status"] != "authenticated":
+        raise bridge_error(
+            401,
+            "login_required",
+            "Platform session is not authenticated; scan the QR code or open manual verification",
+            phase="session",
+            retryable=True,
+        )
 
 
 @app.post("/v1/creators/discover")
@@ -764,13 +868,20 @@ async def discover(request: DiscoverRequest):
             try:
                 output, _ = await communicate(process, DISCOVER_TIMEOUT_SECONDS)
             except asyncio.TimeoutError:
-                raise HTTPException(504, "Creator discovery timed out")
+                raise bridge_error(
+                    504,
+                    "discovery_timeout",
+                    "Creator discovery timed out",
+                    phase="discovery",
+                    retryable=True,
+                )
             if process.returncode:
-                detail = safe_process_error(output, "Creator discovery failed")
-                if any(word in detail.lower() for word in ("login", "cookie", "verify", "captcha")):
-                    write_state(request.platform, "expired", "Session expired or verification is required")
-                    raise HTTPException(401, "login_required")
-                raise HTTPException(502, detail)
+                raise_worker_failure(
+                    request.platform,
+                    job,
+                    output,
+                    "discovery",
+                )
             try:
                 contract = provider_contract(
                     job,
@@ -778,7 +889,13 @@ async def discover(request: DiscoverRequest):
                     expected_mode="discover",
                 )
             except ValueError as exc:
-                raise HTTPException(502, str(exc)) from exc
+                raise bridge_error(
+                    502,
+                    "provider_contract_invalid",
+                    str(exc),
+                    phase="discovery_contract",
+                    retryable=False,
+                ) from exc
             items, seen = [], set()
             for raw in jsonl_items(job):
                 try:
@@ -786,7 +903,7 @@ async def discover(request: DiscoverRequest):
                         normalize(request.platform, raw), contract
                     )
                 except (TypeError, ValueError) as exc:
-                    raise HTTPException(502, str(exc)) from exc
+                    raise contract_error(str(exc), "discovery_contract") from exc
                 if item["remote_id"] and item["remote_id"] not in seen and item["original"]:
                     seen.add(item["remote_id"]); items.append(item)
             expected_original_ids: list[str] = []
@@ -797,22 +914,40 @@ async def discover(request: DiscoverRequest):
                 canonical_id = str(metadata.get("canonical_id") or "").strip()
                 aliases = metadata.get("aliases") or []
                 if not canonical_id or not isinstance(aliases, list):
-                    raise HTTPException(502, "Provider contract has invalid content identities")
+                    raise contract_error(
+                        "Provider contract has invalid content identities",
+                        "discovery_contract",
+                    )
                 expected_original_ids.append(canonical_id)
                 for identity in (canonical_id, *(str(alias).strip() for alias in aliases)):
                     if not identity:
-                        raise HTTPException(502, "Provider contract has invalid content identities")
+                        raise contract_error(
+                            "Provider contract has invalid content identities",
+                            "discovery_contract",
+                        )
                     owner = identity_owners.get(identity)
                     if owner is not None and owner != canonical_id:
-                        raise HTTPException(502, "Provider contract has colliding content identities")
+                        raise contract_error(
+                            "Provider contract has colliding content identities",
+                            "discovery_contract",
+                        )
                     identity_owners[identity] = canonical_id
             if (
                 len(expected_original_ids) != len(set(expected_original_ids))
                 or seen != set(expected_original_ids)
             ):
-                raise HTTPException(502, "Provider contract and discovery records do not match")
+                raise contract_error(
+                    "Provider contract and discovery records do not match",
+                    "discovery_contract",
+                )
             if not items:
-                raise HTTPException(502, "Provider completed but returned no recognizable creator content")
+                raise bridge_error(
+                    502,
+                    "provider_output_empty",
+                    "Provider completed but returned no recognizable creator content",
+                    phase="discovery_contract",
+                    retryable=True,
+                )
             discovery = contract.get("discovery") or {}
             truncated = bool(
                 discovery.get("truncated", len(items) >= request.limit)
@@ -838,18 +973,37 @@ async def stage(request: StageRequest):
                     monitor_root=job,
                 )
             except asyncio.TimeoutError:
-                raise HTTPException(504, "Content staging timed out")
+                raise bridge_error(
+                    504,
+                    "staging_timeout",
+                    "Content staging timed out",
+                    phase="staging",
+                    retryable=True,
+                )
             except StageResourceLimitError as exc:
-                raise HTTPException(exc.status_code, str(exc)) from exc
+                raise bridge_error(
+                    exc.status_code,
+                    "staging_resource_limit",
+                    str(exc),
+                    phase="staging",
+                    retryable=True,
+                ) from exc
             if process.returncode:
-                detail = safe_process_error(output, "Content staging failed")
-                if any(word in detail.lower() for word in ("login", "cookie", "verify", "captcha")):
-                    write_state(request.platform, "expired", "Session expired or verification is required")
-                    raise HTTPException(401, "login_required")
-                raise HTTPException(502, detail)
+                raise_worker_failure(
+                    request.platform,
+                    job,
+                    output,
+                    "staging",
+                )
             raw_items = jsonl_items(job)
             if not raw_items:
-                raise HTTPException(502, "Provider returned no content detail")
+                raise bridge_error(
+                    502,
+                    "provider_output_empty",
+                    "Provider returned no content detail",
+                    phase="staging_contract",
+                    retryable=True,
+                )
             raw_item = raw_items[-1]
             try:
                 contract = provider_contract(
@@ -863,11 +1017,17 @@ async def stage(request: StageRequest):
                     normalize(request.platform, raw_item), contract
                 )
             except (TypeError, ValueError) as exc:
-                raise HTTPException(502, str(exc)) from exc
+                raise contract_error(str(exc), "staging_contract") from exc
             if not contract_identity_matches(request.content_id, item):
-                raise HTTPException(502, "Provider returned content that does not match the requested id")
+                raise contract_error(
+                    "Provider returned content that does not match the requested id",
+                    "staging_contract",
+                )
             if not item["original"]:
-                raise HTTPException(502, "Provider returned a repost for an original-content request")
+                raise contract_error(
+                    "Provider returned a repost for an original-content request",
+                    "staging_contract",
+                )
 
             media, downloaded_count, unrecognized_count = staged_media(job)
             downloaded_bytes = sum(int(record["size_bytes"]) for record in media)

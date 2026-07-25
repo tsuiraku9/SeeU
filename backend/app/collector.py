@@ -4,6 +4,7 @@ import asyncio
 import logging
 import random
 import re
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import func, select
@@ -34,7 +35,7 @@ from .models import (
     ObservedContent,
     utcnow,
 )
-from .provider import CrawlerProvider, ProviderExecutionError, ProviderUnavailableError
+from .provider import CrawlerProvider, ProviderError, ProviderExecutionError, ProviderUnavailableError
 
 
 logger = logging.getLogger(__name__)
@@ -44,6 +45,16 @@ POLL_CANCELLED_ERROR = "Polling cancelled before completion"
 def safe_error(exc: Exception) -> str:
     """Keep diagnostics while removing signed/query-string credentials from URLs."""
     return re.sub(r"(https?://[^\s?]+)\?[^\s]+", r"\1?[query-redacted]", str(exc))[:4000]
+
+
+def provider_failure_details(exc: ProviderError) -> dict[str, object]:
+    """Persist actionable provider metadata without leaking signed URL queries."""
+    return {
+        "code": exc.code,
+        "phase": exc.phase,
+        "retryable": exc.retryable,
+        "message": safe_error(exc),
+    }
 
 
 def ref_identities(ref: ContentRef) -> tuple[str, ...]:
@@ -56,7 +67,14 @@ class CollectorService:
         self.archive = ArchiveManager(settings)
         self.provider = CrawlerProvider(settings)
         self._locks: dict[int, asyncio.Lock] = {}
+        self._poll_slots = asyncio.Semaphore(settings.crawler_poll_concurrency)
         self._platform_limits = {platform: asyncio.Semaphore(1) for platform in get_platforms()}
+
+    @asynccontextmanager
+    async def provider_slot(self):
+        """Share the browser budget with scheduled polls and manual tests."""
+        async with self._poll_slots:
+            yield
 
     def _schedule_next(self, account: Account, failed: bool = False) -> None:
         if failed:
@@ -108,8 +126,9 @@ class CollectorService:
                 run_id = run.id
                 platform = account.platform
             try:
-                async with self._platform_limits[platform]:
-                    await self._execute(account_id, run_id)
+                async with self.provider_slot():
+                    async with self._platform_limits[platform]:
+                        await self._execute(account_id, run_id)
             except asyncio.CancelledError:
                 self._persist_cancelled_poll(account_id, run_id)
                 raise
@@ -134,13 +153,23 @@ class CollectorService:
             account_slug = account.slug
         try:
             used_fallback = False
+            fallback_attempted = False
+            primary_provider_failure: dict[str, object] | None = None
             try:
                 refs = await self.provider.discover(
                     adapter.platform, source_url, self.settings.crawler_discovery_limit
                 )
-            except (ProviderUnavailableError, ProviderExecutionError):
-                if adapter.platform.value not in {"bilibili", "weibo"}:
+            except ProviderError as exc:
+                primary_provider_failure = provider_failure_details(exc)
+                if (
+                    not isinstance(
+                        exc,
+                        (ProviderUnavailableError, ProviderExecutionError),
+                    )
+                    or adapter.platform.value not in {"bilibili", "weibo"}
+                ):
                     raise
+                fallback_attempted = True
                 used_fallback = True
                 refs = await adapter.fetch_latest(source_url)
             active_discovery_limit = 20 if used_fallback else self.settings.crawler_discovery_limit
@@ -203,7 +232,10 @@ class CollectorService:
                         "seed_archived": bool(
                             seed_ref and seed_ref.remote_id in archived_observation_ids
                         ),
+                        "provider_path": "fallback" if used_fallback else "mediacrawler",
                     }
+                    if primary_provider_failure is not None:
+                        run.details["primary_provider_failure"] = primary_provider_failure
                     db.flush()
                     write_account_ledger(
                         self.settings,
@@ -300,6 +332,8 @@ class CollectorService:
                     "provider_path": "fallback" if used_fallback else "mediacrawler",
                     "gap_detected": gap_detected,
                 }
+                if primary_provider_failure is not None:
+                    run.details["primary_provider_failure"] = primary_provider_failure
                 write_account_ledger(
                     self.settings,
                     account,
@@ -320,7 +354,32 @@ class CollectorService:
                 assert account and run
                 account.consecutive_failures += 1
                 account.status = AccountStatus.blocked if isinstance(exc, AccessBlockedError) else AccountStatus.error
-                account.last_error = safe_error(exc)
+                fallback_error = safe_error(exc)
+                if primary_provider_failure is not None and fallback_attempted:
+                    primary_message = str(
+                        primary_provider_failure.get("message")
+                        or "MediaCrawler provider failed"
+                    )
+                    account.last_error = (
+                        f"MediaCrawler discovery failed: {primary_message}; "
+                        f"fallback discovery failed: {fallback_error}"
+                    )[:4000]
+                    run.details = {
+                        "provider_path": "fallback",
+                        "primary_provider_failure": primary_provider_failure,
+                        "fallback_failure": {
+                            "type": type(exc).__name__,
+                            "message": fallback_error,
+                        },
+                    }
+                elif primary_provider_failure is not None:
+                    account.last_error = fallback_error
+                    run.details = {
+                        "provider_path": "mediacrawler",
+                        "primary_provider_failure": primary_provider_failure,
+                    }
+                else:
+                    account.last_error = fallback_error
                 account.last_polled_at = utcnow()
                 self._schedule_next(account, failed=True)
                 run.status = JobStatus.failed
