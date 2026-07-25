@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import os
 import re
+import signal
+import sys
 from datetime import datetime, timezone
 from urllib.parse import parse_qs, urlencode, urlparse
 
@@ -48,6 +52,89 @@ class BilibiliAdapter(PublicPageAdapter):
     def account_slug(self, profile_url: str) -> str:
         match = re.search(r"space\.bilibili\.com/(\d+)", profile_url)
         return safe_slug(match.group(1) if match else urlparse(profile_url).path)
+
+    @staticmethod
+    def _refs_from_ytdlp_payload(payload: object) -> list[ContentRef]:
+        if not isinstance(payload, dict) or not isinstance(payload.get("entries"), list):
+            raise StructureChangedError("Bilibili yt-dlp listing returned an unknown structure")
+        refs: list[ContentRef] = []
+        seen: set[str] = set()
+        for entry in payload["entries"]:
+            if not isinstance(entry, dict):
+                continue
+            remote_id = str(entry.get("id") or "").strip()
+            if (
+                not re.fullmatch(r"BV[\w]+", remote_id)
+                or remote_id in seen
+            ):
+                continue
+            seen.add(remote_id)
+            refs.append(
+                ContentRef(
+                    remote_id,
+                    f"https://www.bilibili.com/video/{remote_id}",
+                )
+            )
+            if len(refs) >= 20:
+                break
+        if not refs:
+            raise StructureChangedError(
+                "Bilibili yt-dlp listing contained no recognizable video submissions"
+            )
+        return refs
+
+    async def _fetch_latest_with_ytdlp(self, profile_url: str) -> list[ContentRef]:
+        process = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-m",
+            "yt_dlp",
+            "--flat-playlist",
+            "--playlist-end",
+            "20",
+            "--dump-single-json",
+            "--skip-download",
+            "--quiet",
+            "--no-warnings",
+            "--",
+            profile_url,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            start_new_session=os.name == "posix",
+        )
+
+        def stop_process() -> None:
+            try:
+                if os.name == "posix" and process.pid:
+                    os.killpg(process.pid, signal.SIGKILL)
+                else:
+                    process.kill()
+            except (ProcessLookupError, PermissionError):
+                pass
+
+        try:
+            stdout, _stderr = await asyncio.wait_for(
+                process.communicate(),
+                timeout=min(self.settings.request_timeout_seconds, 120),
+            )
+        except TimeoutError as exc:
+            stop_process()
+            await process.communicate()
+            raise StructureChangedError("Bilibili yt-dlp listing timed out") from exc
+        except asyncio.CancelledError:
+            stop_process()
+            await asyncio.shield(process.communicate())
+            raise
+        if process.returncode != 0:
+            raise StructureChangedError(
+                "Bilibili yt-dlp public listing was rejected by the platform"
+            )
+        try:
+            payload = json.loads(stdout)
+        except json.JSONDecodeError as exc:
+            raise StructureChangedError(
+                "Bilibili yt-dlp listing returned invalid JSON"
+            ) from exc
+        return self._refs_from_ytdlp_payload(payload)
 
     async def _require_original_video(
         self,
@@ -96,7 +183,18 @@ class BilibiliAdapter(PublicPageAdapter):
     async def fetch_latest(self, profile_url: str) -> list[ContentRef]:
         normalized = self.normalize_profile_url(profile_url)
         creator_id = self.account_slug(normalized)
-        refs = await super().fetch_latest(normalized)
+        page_error: AdapterError | None = None
+        try:
+            refs = await super().fetch_latest(normalized)
+        except AdapterError as exc:
+            page_error = exc
+            try:
+                refs = await self._fetch_latest_with_ytdlp(normalized)
+            except AdapterError as ytdlp_error:
+                raise StructureChangedError(
+                    "Bilibili public-page and yt-dlp discovery both failed: "
+                    f"{page_error}; {ytdlp_error}"
+                ) from ytdlp_error
         semaphore = asyncio.Semaphore(4)
 
         async def verify(ref: ContentRef) -> ContentRef | None:
@@ -178,7 +276,7 @@ class DouyinAdapter(PublicPageAdapter):
 
 class XiaohongshuAdapter(PublicPageAdapter):
     platform = Platform.xiaohongshu
-    allowed_hosts = ("xiaohongshu.com", "xhslink.com")
+    allowed_hosts = ("xiaohongshu.com", "xhslink.com", "xhslink.cn")
     content_patterns = (
         re.compile(r"https?://(?:www\.)?xiaohongshu\.com/explore/(?P<id>[a-fA-F0-9]+)"),
         re.compile(r"https?://(?:www\.)?xiaohongshu\.com/discovery/item/(?P<id>[a-fA-F0-9]+)"),
@@ -188,7 +286,10 @@ class XiaohongshuAdapter(PublicPageAdapter):
         normalized = super().normalize_profile_url(url)
         parsed = urlparse(normalized)
         host = (parsed.hostname or "").lower().rstrip(".")
-        if host == "xhslink.com" or host.endswith(".xhslink.com"):
+        if any(
+            host == domain or host.endswith("." + domain)
+            for domain in ("xhslink.com", "xhslink.cn")
+        ):
             if parsed.path in {"", "/"}:
                 raise AdapterError("Xiaohongshu short URL must contain a link token")
             return normalized

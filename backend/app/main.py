@@ -264,6 +264,7 @@ def capabilities(request: Request, db: DbSession) -> dict:
         "strict_media_completeness": True,
         "account_ledger_recovery": True,
         "archive_manifest_schema": 2,
+        "fake_ip_dns_enabled": settings.allow_fake_ip_dns,
         "manual_verification_url": (
             f"http://{settings.novnc_url_host}:{settings.novnc_port}"
         ),
@@ -458,17 +459,18 @@ async def test_account(account_id: int, request: Request, db: DbSession) -> Acco
     if not account:
         raise HTTPException(status_code=404, detail="账号不存在")
     adapter = get_adapter(account.platform, settings)
-    try:
-        refs = await provider.discover(account.platform, account.source_url)
-    except (ProviderUnavailableError, ProviderExecutionError) as exc:
-        if account.platform not in {Platform.bilibili, Platform.weibo}:
-            raise provider_http_error(exc) from exc
+    async with collector.provider_slot():
         try:
-            refs = await adapter.fetch_latest(account.source_url)
-        except AdapterError as adapter_exc:
-            raise HTTPException(status_code=422, detail=str(adapter_exc)) from adapter_exc
-    except ProviderError as exc:
-        raise provider_http_error(exc) from exc
+            refs = await provider.discover(account.platform, account.source_url)
+        except (ProviderUnavailableError, ProviderExecutionError) as exc:
+            if account.platform not in {Platform.bilibili, Platform.weibo}:
+                raise provider_http_error(exc) from exc
+            try:
+                refs = await adapter.fetch_latest(account.source_url)
+            except AdapterError as adapter_exc:
+                raise HTTPException(status_code=422, detail=str(adapter_exc)) from adapter_exc
+        except ProviderError as exc:
+            raise provider_http_error(exc) from exc
     return AccountTestOut(ok=True, found=len(refs), latest_ids=[ref.remote_id for ref in refs[:5]])
 
 
@@ -887,6 +889,16 @@ def summary(request: Request, db: DbSession) -> dict:
         )
         or 0,
     }
+
+
+@app.api_route(
+    "/api/{unknown_path:path}",
+    methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"],
+    include_in_schema=False,
+)
+def unknown_api_route(unknown_path: str) -> None:
+    """Keep unknown API paths out of the SPA fallback and return a real 404."""
+    raise HTTPException(status_code=404, detail="API endpoint not found")
 
 
 frontend_candidates = [Path("frontend/dist"), Path("/app/frontend_dist")]

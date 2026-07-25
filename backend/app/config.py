@@ -33,6 +33,8 @@ class Settings(BaseSettings):
     crawler_provider_enabled: bool = True
     crawler_request_timeout_seconds: int = Field(default=900, ge=5, le=900)
     crawler_discovery_limit: int = Field(default=500, ge=20, le=500)
+    crawler_poll_concurrency: int = Field(default=1, ge=1, le=4)
+    allow_fake_ip_dns: bool = False
     novnc_bind_address: str = "127.0.0.1"
     novnc_port: int = Field(default=7900, ge=1, le=65535)
     import_max_bytes: int = Field(default=2 * 1024**3, ge=1024)

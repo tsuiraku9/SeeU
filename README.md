@@ -90,10 +90,20 @@ import account.
    WEBUI_PORT=8080
    NOVNC_BIND_ADDRESS=127.0.0.1
    NOVNC_PORT=7900
+   # 仅当宿主机使用 Clash/Mihomo Fake-IP DNS 时开启。
+   ALLOW_FAKE_IP_DNS=false
+   CRAWLER_POLL_CONCURRENCY=1
+   BILIBILI_DISCOVERY_CONCURRENCY=3
    POLL_INTERVAL_MINUTES=60
    ```
 
    显式配置的 `WEBUI_LOGIN_TOKEN` 必须是至少 24 个可打印字符；推荐使用至少 32 字节随机数生成的高熵 Token。应用不会把显式配置或用户提交的 Token 写入日志；使用显式配置启动时，还会删除陈旧的自动 Token 文件，避免误用旧凭据。`WEBUI_PORT` 同时决定容器内 Uvicorn 的监听端口和宿主机回环发布端口。旧 `.env` 中的 `APP_PORT` 仅在没有 `WEBUI_PORT` 时作为兼容回退，已弃用，新配置不应继续使用。
+
+   如果容器内把平台域名解析到 `198.18.0.0/15` 或
+   `fdfe:dcba:9876::/48`，说明宿主机正在使用 Clash/Mihomo Fake-IP
+   DNS。此时可显式设置 `ALLOW_FAKE_IP_DNS=true`。该开关只放行这两个
+   Fake-IP 网段；普通私网、回环、链路本地地址仍会被拒绝。没有使用
+   Fake-IP DNS 的服务器应保持默认 `false`。
 
 3. 构建并启动。如果 `WEBUI_LOGIN_TOKEN` 留空，从受保护的状态文件读取本次启动自动生成的 Token：
 
@@ -105,6 +115,19 @@ import account.
    Windows PowerShell 使用 `Get-Content .\data\state\webui-login-token.txt`。服务日志只会报告 Token 文件路径，不会包含 Token 值。
 
 4. 默认打开本机 `http://127.0.0.1:8080`，使用状态文件中读取或 `.env` 中配置的 Token 登录。自动生成的 Token 只在当前进程生命周期内有效；容器或应用重启后会原子替换该文件并生成新 Token，使旧 Web UI 会话失效。需要稳定登录凭据时，应在 `.env` 中显式配置强 `WEBUI_LOGIN_TOKEN`。添加账号时会立即建立基线并归档最近一条历史内容；后续新增内容将自动归档。远程管理请使用 SSH/VPN 隧道或同机 HTTPS 反向代理。Web UI 与 noVNC 均只允许发布到回环地址；`APP_BIND_ADDRESS` 或 `NOVNC_BIND_ADDRESS` 配置为非回环地址时，相应容器会拒绝启动。
+
+   小红书扫码后若平台要求短信或安全二次验证，Web UI 会切换为
+   “需要验证”。请经 SSH/VPN 隧道打开 noVNC，并在小红书页面中人工
+   输入短信验证码；系统不会读取、保存或自动提交验证码。远程服务器
+   上可先建立 `ssh -L 7900:127.0.0.1:7900 <server>` 隧道，再访问
+   `http://127.0.0.1:7900/vnc.html?autoconnect=1&resize=scale`。
+   添加小红书监控账号时可使用官方主页 URL，以及 `xhslink.com` 或
+   `xhslink.cn` 分享短链；Bridge 会逐跳校验重定向目标，拒绝跳出小红书
+   域名或解析到非公网地址的链接。
+
+   微博登录只有在二维码确实生成后才进入“等待扫码”，不会再把上游
+   `exit(0)` 当作登录成功。二维码超时后请重新点击登录并在超时窗口内
+   扫码。
 
 > **公网安全警告：** 不要将 Web UI 或 noVNC 端口直接发布到公网或局域网。HTTP 会明文传输登录 Token，因此 `.env` 和 `data/state/webui-login-token.txt` 都必须按敏感凭据保护；Token 不应写入日志。noVNC 没有应用级认证。需要远程访问时，应通过 VPN/SSH 隧道，或由同机 Caddy、Nginx 等以域名和 HTTPS 反向代理 `127.0.0.1:<WEBUI_PORT>`，并设置 `COOKIE_SECURE=true`；noVNC 仍应只经受控隧道访问。
 
@@ -119,12 +142,13 @@ data/
 ├── archive/_state/accounts/{platform}/{account}.json  # schema-v2 ledger/tombstone
 ├── browser/mediacrawler/{platform}/
 ├── provider-staging/{job_id}/
+├── provider-staging/.runtime-tmp/  # startup-cleared multipart/browser temp
 ├── provider-state/
 ├── state/app.db
 └── state/webui-login-token.txt  # only while using an auto-generated token
 ```
 
-Worker 会在上游 JSONL 序列化前从平台原始对象捕获规范 ID/URL、原创与置顶标志、内容类型、精确媒体槽位和不支持状态，并在 Provider 成功结束后原子写出 `bridge-contract.json` schema v1；Bridge 不接受缺失、未知或自相矛盾的 contract。Provider 媒体同时写入 `provider-staging`，并明确给出期望数量、实收数量和完整标记。主服务校验相对路径、唯一性、数量、大小、MIME、内容类型和 SHA-256 后，再将单条内容写入归档同级 `.tmp-*` 目录。任何期望媒体缺失都会拒绝发布，并以 `pending_refs` 持久留在 schema-v2 账号账本中，后续即使该引用滑出当前 500 条发现窗口也会继续重试；全部校验成功后才清除 pending 并原子移动到正式目录。磁盘剩余空间低于 `MIN_FREE_DISK_GB` 时下载自动暂停，已有归档不会被删除。
+Bridge 先以权限为 `0600` 的原子 `bridge-request.json` 向 worker 传递任务参数，worker 读取后立即删除，平台 URL 和签名查询参数不会进入进程命令行。Worker 会在上游 JSONL 序列化前从平台原始对象捕获规范 ID/URL、原创与置顶标志、内容类型、精确媒体槽位和不支持状态，并在 Provider 成功结束后原子写出 `bridge-contract.json` schema v1；Bridge 不接受缺失、未知或自相矛盾的 contract。Provider 媒体同时写入 `provider-staging`，并明确给出期望数量、实收数量和完整标记。主服务校验相对路径、唯一性、数量、大小、MIME、内容类型和 SHA-256 后，再将单条内容写入归档同级 `.tmp-*` 目录。任何期望媒体缺失都会拒绝发布，并以 `pending_refs` 持久留在 schema-v2 账号账本中，后续即使该引用滑出当前 500 条发现窗口也会继续重试；全部校验成功后才清除 pending 并原子移动到正式目录。磁盘剩余空间低于 `MIN_FREE_DISK_GB` 时下载自动暂停，已有归档不会被删除。
 
 Compose 还通过 `ARCHIVE_MEMORY_LIMIT`（默认 `2g`）和 `CRAWLER_MEMORY_LIMIT`（默认 `3g`）限制容器内存。固定 Provider 的部分平台媒体客户端仍会先在内存中接收单个文件；若异常大文件触发内存上限，容器会重启，主服务可能对 Bilibili、微博进入有限 fallback，或将小红书、抖音及 fallback 失败的引用保留为待重试。不完整的 Sidecar 暂存结果不会形成“完整”归档。可按宿主机容量调整上限，但不应取消限制。
 
@@ -173,11 +197,17 @@ Vite 开发服务器会将 `/api` 代理到 `http://localhost:8000`。
 - 单平台同一时间只运行一个账号采集，媒体下载默认最多并发 2 个。
 - 失败采用指数退避，最长延迟 24 小时；一个内容下载失败不会阻断同账号其他新增内容。
 - Sidecar 每次最多发现最新 500 条公开原创内容，所有终态已见 ID 都写入独立观察表和归档恢复账本，不再以 100 条截断。失败或媒体不完整的引用以 `pending_refs` 单独持久化，成功归档前不会被当成已完成；若已饱和的发现窗口与既有水位完全不重叠，账号会保留 `gap_detected` 状态，避免把可能漏采误报为完整。
-- Bilibili、微博的有限回退适配器仍最多返回 20 条；调度器会并行处理到期账号，同时保持同平台一次只运行一个采集任务。
+- Bilibili、微博的有限回退适配器仍最多返回 20 条。为避免多个有界面
+  Chromium 同时运行导致 840 秒任务超时，调度采集默认通过
+  `CRAWLER_POLL_CONCURRENCY=1` 全局串行执行，并继续保证同平台一次只运行
+  一个任务；资源充足的服务器可谨慎提高到 2–4，但必须先验证真实平台
+  任务仍能在超时内完成。B 站创作者 discovery 内部的详情查找单独使用
+  `BILIBILI_DISCOVERY_CONCURRENCY=3`，仅可配置为 1–4；这是为了让最多
+  500 条的有界窗口在 840 秒内完成，媒体暂存和其他平台仍保持单并发。
 
 ## 平台适配说明
 
-- Bilibili：MediaCrawler 为主要 Provider；固定 commit 的健康主链路当前只发现创作者投稿视频，并仅把详情字段 `copyright == 1` 的投稿视为原创。Provider 不可用或执行失败时，内置适配器会用公开详情 API 再次校验作者与原创标记，并只归档验证通过的视频、使用 yt-dlp 处理媒体；转载、作者不符以及无法验证原创性的动态和专栏不会归档。系统不会把两条发现结果静默合并，因此动态和专栏仍是已知覆盖缺口。
+- Bilibili：MediaCrawler 为主要 Provider；固定 commit 的健康主链路当前只发现创作者投稿视频，并仅把详情字段 `copyright == 1` 的投稿视为原创。Provider 不可用或执行失败时，内置适配器先尝试公开空间页；页面结构不再暴露投稿链接时，复用现有 yt-dlp 的 WBI 空间列表实现并严格限制为 20 条。每条候选仍须经公开详情 API 重新校验作者与 `copyright == 1`，只有验证通过的视频才会归档，并使用 yt-dlp 处理媒体；转载、作者不符以及无法验证原创性的动态和专栏不会归档。系统不会把两条发现结果静默合并，因此动态和专栏仍是已知覆盖缺口。
 - 微博：MediaCrawler 为主要 Provider；有限回退适配器使用移动端公开数据响应或公开页面，并主动排除转发微博。
 - 抖音：通过 MediaCrawler 的平台登录态发现公开视频和图文并暂存媒体，不使用内置适配器回退。
 - 小红书：通过 MediaCrawler 的平台登录态发现公开笔记并暂存媒体，不使用内置适配器回退。
