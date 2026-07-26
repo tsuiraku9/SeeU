@@ -1,8 +1,8 @@
 <div align="center">
 
-# SeeU
+# 👁我会一直看着你👁
 
-**👁我会一直看着你👁 · 多平台公开内容监控与本地归档**
+**SeeU · 多平台公开内容监控与本地归档**
 
 [![CI](https://github.com/tsuiraku9/SeeU/actions/workflows/ci.yml/badge.svg)](https://github.com/tsuiraku9/SeeU/actions/workflows/ci.yml)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
