@@ -10,16 +10,26 @@ from app.config import Settings
 
 @pytest.mark.parametrize(
     "value",
-    ["0.0.0.0", "::", "127.0.0.2", "192.168.1.10", "example.com", "localhost"],
+    ["", "example.com", "localhost", "999.1.1.1", "127.0.0.1:8080"],
 )
-def test_published_bind_address_must_be_loopback(value: str) -> None:
+def test_published_bind_address_must_be_an_ip_address(value: str) -> None:
     with pytest.raises(ValidationError):
         Settings(app_bind_address=value)
 
 
-@pytest.mark.parametrize("value", ["127.0.0.1", "::1"])
-def test_supported_loopback_bind_addresses_are_accepted(value: str) -> None:
-    assert Settings(app_bind_address=value).app_bind_address == value
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("127.0.0.1", "127.0.0.1"),
+        ("::1", "::1"),
+        ("0.0.0.0", "0.0.0.0"),
+        ("::", "::"),
+        ("192.168.1.10", "192.168.1.10"),
+        ("2001:0DB8::1", "2001:db8::1"),
+    ],
+)
+def test_valid_bind_addresses_are_accepted(value: str, expected: str) -> None:
+    assert Settings(app_bind_address=value).app_bind_address == expected
 
 
 def test_external_provider_requires_url_and_strong_token_together() -> None:

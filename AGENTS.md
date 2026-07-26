@@ -77,9 +77,11 @@ it in a token-authenticated Web UI.
   observation ledger, crawl history, and Web UI session state.
 - `data/state/webui-login-token.txt`: ephemeral credential handoff used only
   when `WEBUI_LOGIN_TOKEN` is empty.
-- The Web UI must remain published on host loopback (`127.0.0.1:8080` by
-  default). External Provider and manual-verification interfaces have their own
-  security boundary and must not be published by SeeU.
+- The Web UI is published on host loopback (`127.0.0.1:8080`) by default.
+  Administrators may explicitly configure another IPv4/IPv6 publication
+  address and are responsible for TLS and network access controls. External
+  Provider and manual-verification interfaces have their own security boundary
+  and must not be published by SeeU.
 
 ## Collection contract
 

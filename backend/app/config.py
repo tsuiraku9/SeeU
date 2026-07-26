@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import ipaddress
 import os
 import secrets
 from functools import lru_cache
@@ -64,11 +65,12 @@ class Settings(BaseSettings):
 
     @field_validator("app_bind_address")
     @classmethod
-    def loopback_bind_address(cls, value: str) -> str:
+    def valid_bind_address(cls, value: str) -> str:
         value = value.strip().lower()
-        if value not in {"127.0.0.1", "::1"}:
-            raise ValueError("Bind address must be 127.0.0.1 or ::1")
-        return value
+        try:
+            return str(ipaddress.ip_address(value))
+        except ValueError as error:
+            raise ValueError("APP_BIND_ADDRESS must be a valid IPv4 or IPv6 address") from error
 
     @field_validator("provider_base_url")
     @classmethod

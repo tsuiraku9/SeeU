@@ -280,7 +280,8 @@ flowchart LR
 
 ## 🔐 安全与隐私
 
-- Web UI 默认只发布到 `127.0.0.1`，配置层拒绝公网绑定地址；
+- Web UI 默认只发布到 `127.0.0.1`；可通过 `APP_BIND_ADDRESS` 显式选择其他
+  IPv4/IPv6 地址；
 - 使用 Token 登录、签名会话、CSRF 防护和登录限速；
 - 归档媒体只通过认证 API 返回，不作为匿名静态目录发布；
 - SeeU 不接收平台密码、Cookie 文件或浏览器存储导出；
@@ -303,6 +304,15 @@ COOKIE_SECURE=true
 
 纯 HTTP 回环访问应保持 `COOKIE_SECURE=false`。
 
+如确需直接从其他主机访问，可在 `.env` 中显式设置监听所有 IPv4 网卡：
+
+```dotenv
+APP_BIND_ADDRESS=0.0.0.0
+```
+
+也可填写 `::` 或指定网卡的 IPv4/IPv6 地址。非回环绑定会把 Web UI 端口暴露到
+相应网络；请同时限制防火墙来源，并优先通过可信 VPN 或带 TLS 的反向代理访问。
+
 Windows 上可在容器创建 `data/` 后，用**真实登录用户**的管理员 PowerShell
 限制 `.env` 和数据目录 ACL：
 
@@ -315,7 +325,7 @@ Windows 上可在容器创建 `data/` 后，用**真实登录用户**的管理�
 | 变量 | 默认值 | 说明 |
 | --- | ---: | --- |
 | `WEBUI_PORT` | `8080` | Web UI 宿主机与容器端口 |
-| `APP_BIND_ADDRESS` | `127.0.0.1` | 只接受 `127.0.0.1` 或 `::1` |
+| `APP_BIND_ADDRESS` | `127.0.0.1` | 可选的宿主机发布 IPv4/IPv6 地址；`0.0.0.0`/`::` 发布到所有网卡 |
 | `WEBUI_LOGIN_TOKEN` | 空 | 空值时每次启动生成新 Token；显式值至少 24 字符 |
 | `SESSION_SECRET` | 无 | 必填，至少 32 字符；初始化脚本自动生成 |
 | `COOKIE_SECURE` | `false` | 仅在 HTTPS 访问时启用 |
