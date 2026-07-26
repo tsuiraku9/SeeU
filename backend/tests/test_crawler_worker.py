@@ -441,6 +441,7 @@ async def test_slider_guard_failure_becomes_manual_verification_state(tmp_path: 
             RuntimeError(SLIDER_MANUAL_VERIFICATION_MESSAGE),
             "login",
         ),
+        trusted_root=tmp_path,
     )
 
     await bridge.finish_login("douyin", process)
@@ -459,8 +460,13 @@ def test_worker_result_protocol_is_atomic_versioned_and_redacted(tmp_path: Path)
         "staging",
     )
 
-    destination = write_worker_result(tmp_path, result)
-    loaded = read_worker_result(tmp_path, expected_phase="staging")
+    output = tmp_path / "job"
+    destination = write_worker_result(output, result, trusted_root=tmp_path)
+    loaded = read_worker_result(
+        output,
+        trusted_root=tmp_path,
+        expected_phase="staging",
+    )
 
     assert destination.name == "bridge-result.json"
     assert loaded is not None
@@ -493,7 +499,8 @@ def test_worker_request_protocol_keeps_signed_values_in_restricted_job_file(
 ):
     signed_value = "https://www.xiaohongshu.com/user/profile/1?xsec_token=secret"
     destination = write_worker_request(
-        tmp_path,
+        tmp_path / "job",
+        trusted_root=tmp_path,
         platform="xiaohongshu",
         mode="discover",
         value=signed_value,
@@ -501,7 +508,8 @@ def test_worker_request_protocol_keeps_signed_values_in_restricted_job_file(
     )
 
     loaded = read_worker_request(
-        tmp_path,
+        tmp_path / "job",
+        trusted_root=tmp_path,
         expected_platform="xiaohongshu",
         expected_mode="discover",
     )
@@ -509,6 +517,23 @@ def test_worker_request_protocol_keeps_signed_values_in_restricted_job_file(
     assert destination.name == "bridge-request.json"
     assert loaded == {"value": signed_value, "limit": 20}
     assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_worker_protocol_rejects_paths_outside_trusted_root(tmp_path: Path):
+    with pytest.raises(ValueError, match="escapes its trusted root"):
+        write_worker_request(
+            tmp_path.parent / "outside-worker-root",
+            trusted_root=tmp_path,
+            platform="xiaohongshu",
+            mode="discover",
+            value="https://www.xiaohongshu.com/user/profile/fixture",
+            limit=20,
+        )
+
+
+def test_bridge_path_policy_rejects_normalized_parent_escape(tmp_path: Path):
+    with pytest.raises(ValueError, match="escapes its trusted root"):
+        bridge.confined_path(tmp_path, tmp_path / ".." / "outside-bridge-root")
 
 
 @pytest.mark.asyncio
@@ -527,6 +552,7 @@ async def test_spawn_never_places_signed_source_url_in_process_arguments(
 
     monkeypatch.setattr(bridge, "STATE_ROOT", tmp_path / "state")
     monkeypatch.setattr(bridge, "BROWSER_ROOT", tmp_path / "browser")
+    monkeypatch.setattr(bridge, "STAGING_ROOT", tmp_path)
     monkeypatch.setattr(
         bridge.asyncio,
         "create_subprocess_exec",
@@ -549,6 +575,7 @@ async def test_spawn_never_places_signed_source_url_in_process_arguments(
     assert signed_value not in captured
     assert read_worker_request(
         output,
+        trusted_root=tmp_path,
         expected_platform="xiaohongshu",
         expected_mode="discover",
     )["value"] == signed_value
@@ -1041,18 +1068,21 @@ async def test_short_link_redirect_is_revalidated_before_following(
             return None
 
     class FakeClient:
+        def __init__(self, *, base_url, **_kwargs):
+            self.base_url = str(base_url).rstrip("/")
+
         async def __aenter__(self):
             return self
 
         async def __aexit__(self, *_args):
             return None
 
-        def stream(self, _method, url):
-            requested.append(url)
+        def stream(self, _method, url, **_kwargs):
+            requested.append(self.base_url + str(url))
             return StreamContext()
 
     monkeypatch.setattr(bridge.socket, "getaddrinfo", fake_getaddrinfo)
-    monkeypatch.setattr(bridge.httpx, "AsyncClient", lambda **_kwargs: FakeClient())
+    monkeypatch.setattr(bridge.httpx, "AsyncClient", FakeClient)
 
     request = bridge.DiscoverRequest(
         platform="xiaohongshu",
