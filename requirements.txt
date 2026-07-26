@@ -9,5 +9,3 @@ apscheduler>=3.10,<4
 python-multipart>=0.0.12,<1
 itsdangerous>=2.2,<3
 yt-dlp>=2025.1.15
-pytest>=8.3,<9
-pytest-asyncio>=0.24,<1
