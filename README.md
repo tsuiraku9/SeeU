@@ -331,7 +331,7 @@ Windows 上可在容器创建 `data/` 后，用**真实登录用户**的管理�
 | `COOKIE_SECURE` | `false` | 仅在 HTTPS 访问时启用 |
 | `PROVIDER_BASE_URL` | 空 | 可选 Provider 的无路径 HTTP(S) origin |
 | `PROVIDER_API_TOKEN` | 空 | 与 Provider 共享的 Bearer Token，至少 24 字符 |
-| `PROVIDER_DISCOVERY_LIMIT` | `500` | 单次发现上限，可设 20–500 |
+| `PROVIDER_DISCOVERY_LIMIT` | `10` | 单次历史内容发现上限，可设 10–500 |
 | `PROVIDER_POLL_CONCURRENCY` | `1` | Provider 全局轮询并发，可设 1–4 |
 | `POLL_JITTER_MINUTES` | `5` | 成功轮询后的随机调度抖动 |
 | `MIN_FREE_DISK_GB` | `5` | 空闲空间低于该值时暂停归档 |

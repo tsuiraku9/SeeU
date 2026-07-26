@@ -33,7 +33,7 @@ class Settings(BaseSettings):
     provider_base_url: str = ""
     provider_api_token: str = Field(default="", repr=False)
     provider_request_timeout_seconds: int = Field(default=900, ge=5, le=900)
-    provider_discovery_limit: int = Field(default=500, ge=20, le=500)
+    provider_discovery_limit: int = Field(default=10, ge=10, le=500)
     provider_poll_concurrency: int = Field(default=1, ge=1, le=4)
     allow_fake_ip_dns: bool = False
     import_max_bytes: int = Field(default=2 * 1024**3, ge=1024)

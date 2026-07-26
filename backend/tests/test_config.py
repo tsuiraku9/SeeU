@@ -67,6 +67,15 @@ def test_external_provider_configuration_is_normalized() -> None:
     assert settings.provider_base_url == "https://provider.example"
 
 
+def test_provider_discovery_defaults_to_ten_historical_items() -> None:
+    assert Settings().provider_discovery_limit == 10
+
+
+def test_provider_discovery_limit_rejects_values_below_ten() -> None:
+    with pytest.raises(ValidationError):
+        Settings(provider_discovery_limit=9)
+
+
 @pytest.mark.parametrize("value", [0, 65536])
 def test_webui_port_must_be_a_valid_tcp_port(value: int) -> None:
     with pytest.raises(ValidationError):
