@@ -1,19 +1,14 @@
 SeeU
 Copyright 2026 SeeU contributors
 
-Unless a file or third-party notice states otherwise, SeeU's original source
-code is licensed under the MIT License.
+SeeU source code is licensed under the MIT License unless a file states
+otherwise.
 
-The MIT License does not cover MediaCrawler, the MediaCrawler source fetched
-when building the crawler image, or the derived compatibility backport at:
-
-  crawler/upstream_overrides/media_platform/xhs/playwright_sign.py
-
-Those components remain subject to MediaCrawler's NON-COMMERCIAL LEARNING
-LICENSE 1.1. A complete copy is provided at:
-
-  LICENSES/MediaCrawler-NON-COMMERCIAL-LEARNING-LICENSE-1.1.txt
+SeeU does not contain, fetch, build, modify, or distribute MediaCrawler.
+External provider implementations are separate programs selected and operated
+by administrators. They are not covered by SeeU's MIT License and retain their
+own license terms.
 
 Other third-party dependencies retain their respective licenses.
 
-This notice is informational and does not alter any applicable license terms.
+This notice is informational and does not alter any applicable license.

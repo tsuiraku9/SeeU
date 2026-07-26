@@ -678,7 +678,7 @@ describe("dashboard account loading", () => {
 
     expect(await screen.findByRole("heading", { name: "微博 登录成功" })).toBeInTheDocument();
     const success = screen.getByRole("status", { name: "微博 登录成功" });
-    expect(success).toHaveTextContent("登录状态已安全保存在服务器");
+    expect(success).toHaveTextContent("登录状态已保存在外部 Provider");
     expect(success).toHaveFocus();
     fireEvent.click(screen.getByRole("button", { name: "完成" }));
     await waitFor(() => expect(screen.getByRole("button", { name: "重新登录 微博" })).toHaveFocus());

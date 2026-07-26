@@ -14,14 +14,15 @@ REPOSITORY_ROOT = BACKEND_ROOT.parent
 sys.path.insert(0, str(BACKEND_ROOT))
 sys.path.insert(0, str(REPOSITORY_ROOT))
 TEST_ROOT = Path(tempfile.mkdtemp(prefix="public-archive-tests-"))
+os.environ["SEEU_ENV_FILE"] = ""
 os.environ["WEBUI_LOGIN_TOKEN"] = "test-webui-login-token-long-enough-123456"
 os.environ["WEBUI_PORT"] = "8080"
 os.environ["SESSION_SECRET"] = "test-session-secret-that-is-longer-than-32-characters"
 os.environ["DATABASE_PATH"] = str(TEST_ROOT / "state" / "app.db")
 os.environ["ARCHIVE_ROOT"] = str(TEST_ROOT / "archive")
-os.environ["BROWSER_DATA_ROOT"] = str(TEST_ROOT / "browser")
 os.environ["PROVIDER_STAGING_ROOT"] = str(TEST_ROOT / "provider-staging")
-os.environ["CRAWLER_PROVIDER_ENABLED"] = "false"
+os.environ["PROVIDER_BASE_URL"] = ""
+os.environ["PROVIDER_API_TOKEN"] = ""
 os.environ["MIN_FREE_DISK_GB"] = "0.1"
 os.environ["SCHEDULER_ENABLED"] = "false"
 
@@ -34,7 +35,6 @@ def clean_database():
     settings = get_settings()
     for root in (
         settings.archive_root,
-        settings.browser_data_root,
         settings.provider_staging_root,
     ):
         shutil.rmtree(root, ignore_errors=True)

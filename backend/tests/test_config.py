@@ -12,20 +12,49 @@ from app.config import Settings
     "value",
     ["0.0.0.0", "::", "127.0.0.2", "192.168.1.10", "example.com", "localhost"],
 )
-@pytest.mark.parametrize("field", ["app_bind_address", "novnc_bind_address"])
-def test_published_bind_addresses_must_be_loopback(field: str, value: str) -> None:
+def test_published_bind_address_must_be_loopback(value: str) -> None:
     with pytest.raises(ValidationError):
-        Settings(**{field: value})
-
-
-def test_ipv6_loopback_is_rendered_as_a_valid_url_host() -> None:
-    assert Settings(novnc_bind_address="::1").novnc_url_host == "[::1]"
+        Settings(app_bind_address=value)
 
 
 @pytest.mark.parametrize("value", ["127.0.0.1", "::1"])
-@pytest.mark.parametrize("field", ["app_bind_address", "novnc_bind_address"])
-def test_supported_loopback_bind_addresses_are_accepted(field: str, value: str) -> None:
-    assert getattr(Settings(**{field: value}), field) == value
+def test_supported_loopback_bind_addresses_are_accepted(value: str) -> None:
+    assert Settings(app_bind_address=value).app_bind_address == value
+
+
+def test_external_provider_requires_url_and_strong_token_together() -> None:
+    with pytest.raises(ValidationError, match="PROVIDER_API_TOKEN"):
+        Settings(provider_base_url="http://provider.example:8090")
+    with pytest.raises(ValidationError, match="PROVIDER_BASE_URL"):
+        Settings(provider_api_token="provider-token-that-is-long-enough")
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "ftp://provider.example",
+        "http://user:pass@provider.example",
+        "http://provider.example/api",
+        "http://provider.example?token=secret",
+        "http://provider.example/#fragment",
+    ],
+)
+def test_external_provider_url_rejects_unsafe_forms(value: str) -> None:
+    with pytest.raises(ValidationError):
+        Settings(
+            provider_base_url=value,
+            provider_api_token="provider-token-that-is-long-enough",
+        )
+
+
+def test_external_provider_configuration_is_normalized() -> None:
+    settings = Settings(
+        provider_base_url="https://provider.example/",
+        provider_api_token="provider-token-that-is-long-enough",
+    )
+
+    assert settings.provider_configured is True
+    assert settings.provider_base_url == "https://provider.example"
 
 
 @pytest.mark.parametrize("value", [0, 65536])

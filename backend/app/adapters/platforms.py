@@ -349,9 +349,9 @@ class WeiboAdapter(PublicPageAdapter):
             refs: list[ContentRef] = []
             for card in payload.get("data", {}).get("cards", []):
                 mblog = card.get("mblog") or {}
-                # MediaCrawler's pinned Weibo store uses the numeric mblog id.
-                # Keep the fallback on that same canonical identity so provider
-                # failover cannot replay existing posts under their short bid.
+                # Use Weibo's numeric mblog id as the canonical identity so an
+                # external provider and fallback cannot create duplicates via
+                # the short bid alias.
                 remote_id = str(mblog.get("id") or mblog.get("bid") or "")
                 if remote_id and not mblog.get("retweeted_status"):
                     refs.append(ContentRef(remote_id, f"https://m.weibo.cn/status/{remote_id}"))

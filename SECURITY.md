@@ -12,10 +12,10 @@ Use the repository's
 Do not disclose the issue in a public issue, discussion, pull request, log, or
 fixture.
 
-Never include platform passwords, Cookies, login tokens, session secrets, QR
-codes, SMS codes, browser profiles, signed media URLs, private content, or
-archived user data. Redact sensitive values and use synthetic examples wherever
-possible.
+Never include platform passwords, Cookies, login tokens, Provider API tokens,
+session secrets, QR codes, SMS codes, browser profiles, signed media URLs,
+private content, or archived user data. Redact sensitive values and use
+synthetic examples wherever possible.
 
 If private vulnerability reporting is temporarily unavailable, open a minimal
 public issue asking the repository owner to establish a private contact channel.

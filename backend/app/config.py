@@ -6,14 +6,15 @@ import os
 import secrets
 from functools import lru_cache
 from pathlib import Path
+from urllib.parse import urlsplit
 
-from pydantic import Field, PrivateAttr, field_validator
+from pydantic import Field, PrivateAttr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=os.getenv("SEEU_ENV_FILE", ".env") or None,
         extra="ignore",
         hide_input_in_errors=True,
     )
@@ -27,16 +28,13 @@ class Settings(BaseSettings):
     app_bind_address: str = "127.0.0.1"
     database_path: Path = Path("data/state/app.db")
     archive_root: Path = Path("data/archive")
-    browser_data_root: Path = Path("data/browser")
     provider_staging_root: Path = Path("data/provider-staging")
-    crawler_bridge_url: str = "http://crawler:8090"
-    crawler_provider_enabled: bool = True
-    crawler_request_timeout_seconds: int = Field(default=900, ge=5, le=900)
-    crawler_discovery_limit: int = Field(default=500, ge=20, le=500)
-    crawler_poll_concurrency: int = Field(default=1, ge=1, le=4)
+    provider_base_url: str = ""
+    provider_api_token: str = Field(default="", repr=False)
+    provider_request_timeout_seconds: int = Field(default=900, ge=5, le=900)
+    provider_discovery_limit: int = Field(default=500, ge=20, le=500)
+    provider_poll_concurrency: int = Field(default=1, ge=1, le=4)
     allow_fake_ip_dns: bool = False
-    novnc_bind_address: str = "127.0.0.1"
-    novnc_port: int = Field(default=7900, ge=1, le=65535)
     import_max_bytes: int = Field(default=2 * 1024**3, ge=1024)
     import_max_files: int = Field(default=100, ge=1, le=1000)
     poll_interval_minutes: int = Field(default=60, ge=5, le=1440)
@@ -64,7 +62,7 @@ class Settings(BaseSettings):
             raise ValueError("WEBUI_LOGIN_TOKEN must be at most 512 printable characters")
         return value
 
-    @field_validator("app_bind_address", "novnc_bind_address")
+    @field_validator("app_bind_address")
     @classmethod
     def loopback_bind_address(cls, value: str) -> str:
         value = value.strip().lower()
@@ -72,9 +70,54 @@ class Settings(BaseSettings):
             raise ValueError("Bind address must be 127.0.0.1 or ::1")
         return value
 
+    @field_validator("provider_base_url")
+    @classmethod
+    def clean_provider_base_url(cls, value: str) -> str:
+        value = value.strip().rstrip("/")
+        if not value:
+            return ""
+        parsed = urlsplit(value)
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.path not in {"", "/"}
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ValueError(
+                "PROVIDER_BASE_URL must be an http(s) origin without credentials, path, query, or fragment"
+            )
+        return value
+
+    @field_validator("provider_api_token")
+    @classmethod
+    def clean_provider_api_token(cls, value: str) -> str:
+        if any(not character.isprintable() for character in value):
+            raise ValueError("PROVIDER_API_TOKEN must contain printable characters only")
+        value = value.strip()
+        if value and len(value) < 24:
+            raise ValueError("PROVIDER_API_TOKEN must contain at least 24 characters")
+        if len(value) > 512:
+            raise ValueError("PROVIDER_API_TOKEN must be at most 512 printable characters")
+        return value
+
+    @model_validator(mode="after")
+    def require_provider_token(self) -> "Settings":
+        if self.provider_base_url and not self.provider_api_token:
+            raise ValueError(
+                "PROVIDER_API_TOKEN is required when PROVIDER_BASE_URL is configured"
+            )
+        if self.provider_api_token and not self.provider_base_url:
+            raise ValueError(
+                "PROVIDER_BASE_URL is required when PROVIDER_API_TOKEN is configured"
+            )
+        return self
+
     @property
-    def novnc_url_host(self) -> str:
-        return f"[{self.novnc_bind_address}]" if ":" in self.novnc_bind_address else self.novnc_bind_address
+    def provider_configured(self) -> bool:
+        return bool(self.provider_base_url and self.provider_api_token)
 
     def ensure_webui_login_token(self) -> str | None:
         """Generate a fresh token for this startup when configuration left it empty."""
@@ -133,7 +176,6 @@ class Settings(BaseSettings):
     def ensure_directories(self) -> None:
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
         self.archive_root.mkdir(parents=True, exist_ok=True)
-        self.browser_data_root.mkdir(parents=True, exist_ok=True)
         self.provider_staging_root.mkdir(parents=True, exist_ok=True)
 
 

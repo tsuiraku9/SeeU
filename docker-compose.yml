@@ -4,7 +4,7 @@ services:
     container_name: public-content-archive
     restart: unless-stopped
     env_file:
-      - path: .env
+      - path: ${SEEU_ENV_FILE:-.env}
         required: false
     environment:
       WEBUI_LOGIN_TOKEN: ${WEBUI_LOGIN_TOKEN:-}
@@ -15,14 +15,13 @@ services:
       SCHEDULER_ENABLED: ${SCHEDULER_ENABLED:-true}
       DATABASE_PATH: /app/data/state/app.db
       ARCHIVE_ROOT: /app/data/archive
-      BROWSER_DATA_ROOT: /tmp/archive-browser
       PROVIDER_STAGING_ROOT: /app/data/provider-staging
-      CRAWLER_BRIDGE_URL: http://crawler:8090
-      CRAWLER_PROVIDER_ENABLED: ${CRAWLER_PROVIDER_ENABLED:-true}
-      CRAWLER_POLL_CONCURRENCY: ${CRAWLER_POLL_CONCURRENCY:-1}
+      PROVIDER_BASE_URL: ${PROVIDER_BASE_URL:-}
+      PROVIDER_API_TOKEN: ${PROVIDER_API_TOKEN:-}
+      PROVIDER_REQUEST_TIMEOUT_SECONDS: ${PROVIDER_REQUEST_TIMEOUT_SECONDS:-900}
+      PROVIDER_DISCOVERY_LIMIT: ${PROVIDER_DISCOVERY_LIMIT:-500}
+      PROVIDER_POLL_CONCURRENCY: ${PROVIDER_POLL_CONCURRENCY:-1}
       ALLOW_FAKE_IP_DNS: ${ALLOW_FAKE_IP_DNS:-false}
-      NOVNC_BIND_ADDRESS: ${NOVNC_BIND_ADDRESS:-127.0.0.1}
-      NOVNC_PORT: ${NOVNC_PORT:-7900}
       TZ: ${TZ:-Asia/Hong_Kong}
       HOME: /tmp/archive-home
       TMPDIR: /app/data/provider-staging/.runtime-tmp
@@ -60,6 +59,8 @@ services:
       - ./data/archive:/app/data/archive
       - ./data/state:/app/data/state
       - ./data/provider-staging:/app/data/provider-staging
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     read_only: true
     tmpfs:
       - /tmp:size=512m,mode=1777
@@ -72,56 +73,6 @@ services:
     security_opt:
       - no-new-privileges:true
     stop_grace_period: 30s
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
-    depends_on:
-      crawler:
-        condition: service_healthy
-
-  crawler:
-    build:
-      context: ./crawler
-      args:
-        MEDIACRAWLER_COMMIT: d280d22
-    container_name: public-content-crawler
-    restart: unless-stopped
-    environment:
-      DATA_ROOT: /data
-      TZ: ${TZ:-Asia/Hong_Kong}
-      DISCOVER_TIMEOUT_SECONDS: ${DISCOVER_TIMEOUT_SECONDS:-840}
-      STAGE_TIMEOUT_SECONDS: ${STAGE_TIMEOUT_SECONDS:-840}
-      LOGIN_TIMEOUT_SECONDS: ${LOGIN_TIMEOUT_SECONDS:-600}
-      MANUAL_VERIFICATION_TIMEOUT_SECONDS: ${MANUAL_VERIFICATION_TIMEOUT_SECONDS:-480}
-      BILIBILI_DISCOVERY_CONCURRENCY: ${BILIBILI_DISCOVERY_CONCURRENCY:-3}
-      ALLOW_FAKE_IP_DNS: ${ALLOW_FAKE_IP_DNS:-false}
-      MAX_STAGE_FILES: ${IMPORT_MAX_FILES:-100}
-      MAX_STAGE_BYTES: ${MEDIA_MAX_BYTES:-2147483648}
-      MIN_STAGE_FREE_GB: ${MIN_FREE_DISK_GB:-5}
-      NOVNC_PORT: ${NOVNC_PORT:-7900}
-      NOVNC_BIND_ADDRESS: ${NOVNC_BIND_ADDRESS:-127.0.0.1}
-    expose:
-      - "8090"
-    ports:
-      - target: 7900
-        published: "${NOVNC_PORT:-7900}"
-        host_ip: "${NOVNC_BIND_ADDRESS:-127.0.0.1}"
-        protocol: tcp
-    volumes:
-      - ./data/browser/mediacrawler:/data/browser/mediacrawler
-      - ./data/provider-staging:/data/provider-staging
-      - ./data/provider-state:/data/provider-state
-    init: true
-    pids_limit: 1024
-    mem_limit: ${CRAWLER_MEMORY_LIMIT:-3g}
-    shm_size: "2gb"
-    cap_drop:
-      - NET_RAW
-    security_opt:
-      - no-new-privileges:true
-    stop_grace_period: 45s
     logging:
       driver: json-file
       options:

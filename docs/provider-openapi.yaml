@@ -1,0 +1,461 @@
+openapi: 3.1.0
+info:
+  title: SeeU External Provider API
+  version: 1.0.0
+  description: >-
+    Provider-neutral contract for an independently installed content provider.
+    Provider implementations and their dependencies are not part of SeeU.
+security:
+  - bearerAuth: []
+paths:
+  /v1/sessions:
+    get:
+      operationId: listSessions
+      responses:
+        "200":
+          description: Supported platform sessions
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Session"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/ProviderFailure"
+  /v1/sessions/{platform}/login:
+    post:
+      operationId: startLogin
+      parameters:
+        - $ref: "#/components/parameters/Platform"
+      responses:
+        "200":
+          description: Current login session
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionWithQr"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/ProviderFailure"
+  /v1/sessions/{platform}/qr:
+    get:
+      operationId: getLoginQr
+      parameters:
+        - $ref: "#/components/parameters/Platform"
+      responses:
+        "200":
+          description: Current login session and optional QR image
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionWithQr"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/ContractError"
+        "409":
+          $ref: "#/components/responses/ContractError"
+        "500":
+          $ref: "#/components/responses/ProviderFailure"
+  /v1/sessions/{platform}:
+    delete:
+      operationId: logout
+      parameters:
+        - $ref: "#/components/parameters/Platform"
+      responses:
+        "200":
+          description: Logged-out session
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Session"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/ProviderFailure"
+  /v1/creators/discover:
+    post:
+      operationId: discoverCreatorContent
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DiscoverRequest"
+      responses:
+        "200":
+          description: Newest-first recognizable original content
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DiscoverResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          $ref: "#/components/responses/LoginRequired"
+        "500":
+          $ref: "#/components/responses/ProviderFailure"
+  /v1/content/stage:
+    post:
+      operationId: stageContent
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/StageRequest"
+      responses:
+        "200":
+          description: Complete media manifest
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StageResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          $ref: "#/components/responses/LoginRequired"
+        "500":
+          $ref: "#/components/responses/ProviderFailure"
+  /v1/staging/{job_id}/files/{file_id}:
+    get:
+      operationId: downloadStagedFile
+      parameters:
+        - $ref: "#/components/parameters/JobId"
+        - $ref: "#/components/parameters/FileId"
+      responses:
+        "200":
+          description: >-
+            Raw media. Content-Type and Content-Length must match the manifest.
+            Redirects and compressed Content-Encoding are forbidden.
+          content:
+            image/*:
+              schema:
+                type: string
+                format: binary
+            video/*:
+              schema:
+                type: string
+                format: binary
+            audio/*:
+              schema:
+                type: string
+                format: binary
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/ContractError"
+        "500":
+          $ref: "#/components/responses/ProviderFailure"
+  /v1/staging/{job_id}:
+    delete:
+      operationId: cleanupStagingJob
+      parameters:
+        - $ref: "#/components/parameters/JobId"
+      responses:
+        "200":
+          description: Idempotent cleanup result
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  cleaned:
+                    type: boolean
+                required: [cleaned]
+        "204":
+          description: Idempotent cleanup completed without a body
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/ProviderFailure"
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+  parameters:
+    Platform:
+      name: platform
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/Platform"
+    JobId:
+      name: job_id
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/OpaqueId"
+    FileId:
+      name: file_id
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/OpaqueId"
+  responses:
+    Unauthorized:
+      description: Missing or invalid Provider Bearer token
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    LoginRequired:
+      description: Platform login is required
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    ContractError:
+      description: Request or current state cannot be fulfilled
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    ProviderFailure:
+      description: Provider execution failed
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+  schemas:
+    Platform:
+      type: string
+      enum: [xiaohongshu, douyin, weibo, bilibili]
+    OpaqueId:
+      type: string
+      pattern: "^[A-Za-z0-9_-]{1,128}$"
+    SessionStatus:
+      type: string
+      enum:
+        - logged_out
+        - starting
+        - qr_ready
+        - authenticated
+        - expired
+        - manual_verification_required
+        - error
+    Session:
+      type: object
+      additionalProperties: false
+      properties:
+        platform:
+          $ref: "#/components/schemas/Platform"
+        status:
+          $ref: "#/components/schemas/SessionStatus"
+        updated_at:
+          type: [string, "null"]
+          format: date-time
+        message:
+          type: [string, "null"]
+          maxLength: 1000
+        manual_verification_url:
+          type: string
+          format: uri
+          maxLength: 2048
+      required:
+        - platform
+        - status
+        - updated_at
+        - message
+        - manual_verification_url
+    SessionWithQr:
+      type: object
+      additionalProperties: false
+      properties:
+        platform:
+          $ref: "#/components/schemas/Platform"
+        status:
+          $ref: "#/components/schemas/SessionStatus"
+        updated_at:
+          type: [string, "null"]
+          format: date-time
+        message:
+          type: [string, "null"]
+          maxLength: 1000
+        manual_verification_url:
+          type: string
+          format: uri
+          maxLength: 2048
+        image_data_url:
+          type: string
+          pattern: "^data:image/(png|jpeg);base64,"
+          maxLength: 2800000
+      required:
+        - platform
+        - status
+        - updated_at
+        - message
+        - manual_verification_url
+    ErrorDetail:
+      type: object
+      additionalProperties: false
+      properties:
+        code:
+          type: string
+          maxLength: 128
+        message:
+          type: string
+          maxLength: 1000
+        phase:
+          type: [string, "null"]
+          maxLength: 128
+        retryable:
+          type: [boolean, "null"]
+      required: [code, message, phase, retryable]
+    ErrorResponse:
+      type: object
+      additionalProperties: false
+      properties:
+        detail:
+          $ref: "#/components/schemas/ErrorDetail"
+      required: [detail]
+    DiscoverRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        platform:
+          $ref: "#/components/schemas/Platform"
+        profile_url:
+          type: string
+          format: uri
+          maxLength: 4096
+        limit:
+          type: integer
+          minimum: 20
+          maximum: 500
+      required: [platform, profile_url, limit]
+    ContentReference:
+      type: object
+      additionalProperties: false
+      properties:
+        remote_id:
+          type: string
+          minLength: 1
+          maxLength: 256
+        source_url:
+          type: string
+          format: uri
+          maxLength: 4096
+        published_at:
+          type: [string, number, "null"]
+        original:
+          const: true
+        pinned:
+          type: boolean
+        aliases:
+          type: array
+          maxItems: 10
+          uniqueItems: true
+          items:
+            type: string
+            minLength: 1
+            maxLength: 256
+      required:
+        - remote_id
+        - source_url
+        - original
+    DiscoverResponse:
+      type: object
+      additionalProperties: false
+      properties:
+        items:
+          type: array
+          maxItems: 500
+          items:
+            $ref: "#/components/schemas/ContentReference"
+        truncated:
+          type: boolean
+      required: [items, truncated]
+    StageRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        platform:
+          $ref: "#/components/schemas/Platform"
+        content_id:
+          type: string
+          minLength: 1
+          maxLength: 256
+        source_url:
+          type: string
+          format: uri
+          maxLength: 4096
+      required: [platform, content_id, source_url]
+    MediaManifestRecord:
+      type: object
+      additionalProperties: false
+      properties:
+        file_id:
+          $ref: "#/components/schemas/OpaqueId"
+        kind:
+          type: string
+          enum: [image, video, audio]
+        mime_type:
+          type: string
+          pattern: "^(image|video|audio)/"
+        size_bytes:
+          type: integer
+          minimum: 1
+        sha256:
+          type: string
+          pattern: "^[0-9a-f]{64}$"
+      required: [file_id, kind, mime_type, size_bytes, sha256]
+    StageResponse:
+      type: object
+      additionalProperties: false
+      properties:
+        job_id:
+          $ref: "#/components/schemas/OpaqueId"
+        platform:
+          $ref: "#/components/schemas/Platform"
+        content_id:
+          type: string
+          minLength: 1
+          maxLength: 256
+        source_url:
+          type: string
+          format: uri
+          maxLength: 4096
+        title:
+          type: string
+          maxLength: 500
+        author:
+          type: string
+          maxLength: 160
+        text:
+          type: string
+          maxLength: 2000000
+        published_at:
+          type: [string, number]
+        content_type:
+          type: string
+          enum: [image, video, audio, text, unknown]
+        expected_media_count:
+          type: integer
+          minimum: 0
+          maximum: 1000
+        complete:
+          const: true
+        media:
+          type: array
+          maxItems: 1000
+          items:
+            $ref: "#/components/schemas/MediaManifestRecord"
+      required:
+        - job_id
+        - platform
+        - content_id
+        - source_url
+        - title
+        - author
+        - text
+        - published_at
+        - content_type
+        - expected_media_count
+        - complete
+        - media

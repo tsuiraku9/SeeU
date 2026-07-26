@@ -13,9 +13,10 @@ research. Do not add:
 - proxy pools, account farms, DRM bypasses, or access-control bypasses;
 - collection of private content or large-scale crawling behavior.
 
-The MediaCrawler provider and the compatibility backport under
-`crawler/upstream_overrides` remain governed by MediaCrawler's
-NON-COMMERCIAL LEARNING LICENSE 1.1.
+Do not add third-party provider source, modified provider files, provider
+installation scripts, or prebuilt provider images to this repository. Provider
+integrations must use the versioned external HTTP contract in
+`docs/provider-http-contract.md`.
 
 ## Development
 
@@ -35,7 +36,7 @@ pnpm --dir frontend build
 docker compose config --quiet
 ```
 
-Parsing, URL normalization, provider-contract, and adapter changes require
+Parsing, URL normalization, Provider-contract, and adapter changes require
 fixture-based tests. Preserve typed API models, atomic archive promotion,
 keyboard access, visible focus, responsive layouts, and explicit
 loading/empty/error states.

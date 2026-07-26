@@ -35,7 +35,7 @@ from .models import (
     ObservedContent,
     utcnow,
 )
-from .provider import CrawlerProvider, ProviderError, ProviderExecutionError, ProviderUnavailableError
+from .provider import HttpProvider, ProviderError, ProviderExecutionError, ProviderUnavailableError
 
 
 logger = logging.getLogger(__name__)
@@ -65,9 +65,9 @@ class CollectorService:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
         self.archive = ArchiveManager(settings)
-        self.provider = CrawlerProvider(settings)
+        self.provider = HttpProvider(settings)
         self._locks: dict[int, asyncio.Lock] = {}
-        self._poll_slots = asyncio.Semaphore(settings.crawler_poll_concurrency)
+        self._poll_slots = asyncio.Semaphore(settings.provider_poll_concurrency)
         self._platform_limits = {platform: asyncio.Semaphore(1) for platform in get_platforms()}
 
     @asynccontextmanager
@@ -157,7 +157,7 @@ class CollectorService:
             primary_provider_failure: dict[str, object] | None = None
             try:
                 refs = await self.provider.discover(
-                    adapter.platform, source_url, self.settings.crawler_discovery_limit
+                    adapter.platform, source_url, self.settings.provider_discovery_limit
                 )
             except ProviderError as exc:
                 primary_provider_failure = provider_failure_details(exc)
@@ -172,7 +172,7 @@ class CollectorService:
                 fallback_attempted = True
                 used_fallback = True
                 refs = await adapter.fetch_latest(source_url)
-            active_discovery_limit = 20 if used_fallback else self.settings.crawler_discovery_limit
+            active_discovery_limit = 20 if used_fallback else self.settings.provider_discovery_limit
             remote_ids = [ref.remote_id for ref in refs]
             if not baseline_established:
                 seed_ref = refs[0] if refs else None
@@ -232,7 +232,7 @@ class CollectorService:
                         "seed_archived": bool(
                             seed_ref and seed_ref.remote_id in archived_observation_ids
                         ),
-                        "provider_path": "fallback" if used_fallback else "mediacrawler",
+                        "provider_path": "fallback" if used_fallback else "external_http",
                     }
                     if primary_provider_failure is not None:
                         run.details["primary_provider_failure"] = primary_provider_failure
@@ -329,7 +329,7 @@ class CollectorService:
                     "pending_remaining": has_pending,
                     "discovery_limit": active_discovery_limit,
                     "window_truncated": window_truncated,
-                    "provider_path": "fallback" if used_fallback else "mediacrawler",
+                    "provider_path": "fallback" if used_fallback else "external_http",
                     "gap_detected": gap_detected,
                 }
                 if primary_provider_failure is not None:
@@ -358,10 +358,10 @@ class CollectorService:
                 if primary_provider_failure is not None and fallback_attempted:
                     primary_message = str(
                         primary_provider_failure.get("message")
-                        or "MediaCrawler provider failed"
+                        or "external provider failed"
                     )
                     account.last_error = (
-                        f"MediaCrawler discovery failed: {primary_message}; "
+                        f"External provider discovery failed: {primary_message}; "
                         f"fallback discovery failed: {fallback_error}"
                     )[:4000]
                     run.details = {
@@ -375,7 +375,7 @@ class CollectorService:
                 elif primary_provider_failure is not None:
                     account.last_error = fallback_error
                     run.details = {
-                        "provider_path": "mediacrawler",
+                        "provider_path": "external_http",
                         "primary_provider_failure": primary_provider_failure,
                     }
                 else:
@@ -503,14 +503,10 @@ class CollectorService:
                 title=staged.title, author=staged.author, text=staged.text,
                 published_at=staged.published_at, content_type=staged.content_type,
             )
-            job_root = (self.settings.provider_staging_root / staged.job_id).resolve()
-            staging_root = self.settings.provider_staging_root.resolve()
-            if staging_root != job_root.parent:
-                raise ValueError("Invalid provider staging job id")
             archive_path, metadata = self.archive.archive_from_files(
                 content,
                 account_slug,
-                job_root,
+                staged.local_root,
                 staged.media,
                 expected_media_count=staged.expected_media_count,
                 provider_complete=staged.complete,
@@ -522,7 +518,7 @@ class CollectorService:
             archive_path, metadata = await self.archive.archive(content, account_slug)
         finally:
             if staged:
-                await self.provider.cleanup(staged.job_id)
+                await self.provider.cleanup(staged)
         with SessionLocal() as db:
             existing = db.scalar(
                 select(ContentIndex).where(

@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+import hashlib
+
+import httpx
 import pytest
 
+from app.adapters.base import ContentRef
 from app.config import get_settings
 from app.models import Platform
-from app.provider import CrawlerProvider, ProviderExecutionError
+from app.provider import HttpProvider, ProviderExecutionError
 
 
 @pytest.mark.asyncio
-async def test_request_preserves_structured_bridge_error_metadata(monkeypatch):
+async def test_request_preserves_structured_provider_error_metadata(monkeypatch):
     class FakeResponse:
         status_code = 502
         content = b'{"detail": {}}'
@@ -38,8 +42,13 @@ async def test_request_preserves_structured_bridge_error_metadata(monkeypatch):
         "app.provider.httpx.AsyncClient",
         lambda **_kwargs: FakeClient(),
     )
-    provider = CrawlerProvider(
-        get_settings().model_copy(update={"crawler_provider_enabled": True})
+    provider = HttpProvider(
+        get_settings().model_copy(
+            update={
+                "provider_base_url": "http://provider.example",
+                "provider_api_token": "provider-token-that-is-long-enough",
+            }
+        )
     )
 
     with pytest.raises(ProviderExecutionError) as caught:
@@ -52,7 +61,7 @@ async def test_request_preserves_structured_bridge_error_metadata(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_discovery_orders_complete_publication_times_newest_first(monkeypatch):
-    provider = CrawlerProvider(get_settings())
+    provider = HttpProvider(get_settings())
 
     async def request(_method, _path, **_kwargs):
         return {
@@ -89,7 +98,7 @@ async def test_discovery_orders_complete_publication_times_newest_first(monkeypa
 
 @pytest.mark.asyncio
 async def test_discovery_preserves_provider_order_when_a_publication_time_is_missing(monkeypatch):
-    provider = CrawlerProvider(get_settings())
+    provider = HttpProvider(get_settings())
 
     async def request(_method, _path, **_kwargs):
         return {
@@ -134,7 +143,7 @@ async def test_discovery_preserves_provider_order_when_a_publication_time_is_mis
     ],
 )
 async def test_discovery_rejects_empty_or_incomplete_provider_contract(monkeypatch, payload):
-    provider = CrawlerProvider(get_settings())
+    provider = HttpProvider(get_settings())
 
     async def request(_method, _path, **_kwargs):
         return payload
@@ -147,7 +156,7 @@ async def test_discovery_rejects_empty_or_incomplete_provider_contract(monkeypat
 
 @pytest.mark.asyncio
 async def test_stage_requires_explicit_matching_manifest_counts(monkeypatch):
-    provider = CrawlerProvider(get_settings())
+    provider = HttpProvider(get_settings())
 
     async def request(_method, _path, **_kwargs):
         return {
@@ -164,9 +173,7 @@ async def test_stage_requires_explicit_matching_manifest_counts(monkeypatch):
 
     monkeypatch.setattr(provider, "_request", request)
 
-    from app.adapters.base import ContentRef
-
-    with pytest.raises(ProviderExecutionError, match="counts"):
+    with pytest.raises(ProviderExecutionError, match="incomplete"):
         await provider.stage(
             Platform.weibo,
             ContentRef("42", "https://m.weibo.cn/status/42"),
@@ -175,7 +182,7 @@ async def test_stage_requires_explicit_matching_manifest_counts(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_discovery_rejects_alias_collisions(monkeypatch):
-    provider = CrawlerProvider(get_settings())
+    provider = HttpProvider(get_settings())
 
     async def request(_method, _path, **_kwargs):
         return {
@@ -199,3 +206,74 @@ async def test_discovery_rejects_alias_collisions(monkeypatch):
 
     with pytest.raises(ProviderExecutionError, match="colliding"):
         await provider.discover(Platform.bilibili, "https://space.bilibili.com/123")
+
+
+@pytest.mark.asyncio
+async def test_stage_downloads_media_over_http_into_local_staging(monkeypatch, tmp_path):
+    media_bytes = b"\x89PNG\r\n\x1a\n" + b"provider-media"
+    digest = hashlib.sha256(media_bytes).hexdigest()
+    settings = get_settings().model_copy(
+        update={
+            "provider_base_url": "http://provider.example",
+            "provider_api_token": "provider-token-that-is-long-enough",
+            "provider_staging_root": tmp_path,
+        }
+    )
+    provider = HttpProvider(settings)
+
+    async def request(method, path, **_kwargs):
+        if method == "DELETE":
+            assert path == "/v1/staging/remote_job_123"
+            return {}
+        assert method == "POST"
+        assert path == "/v1/content/stage"
+        return {
+            "job_id": "remote_job_123",
+            "platform": "weibo",
+            "content_id": "42",
+            "source_url": "https://m.weibo.cn/status/42",
+            "published_at": "2026-07-15T08:00:00Z",
+            "content_type": "image",
+            "media": [
+                {
+                    "file_id": "image_1",
+                    "kind": "image",
+                    "mime_type": "image/png",
+                    "size_bytes": len(media_bytes),
+                    "sha256": digest,
+                }
+            ],
+            "expected_media_count": 1,
+            "complete": True,
+        }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["authorization"] == "Bearer provider-token-that-is-long-enough"
+        assert request.url.path == "/v1/staging/remote_job_123/files/image_1"
+        return httpx.Response(
+            200,
+            headers={
+                "content-type": "image/png",
+                "content-length": str(len(media_bytes)),
+            },
+            content=media_bytes,
+        )
+
+    monkeypatch.setattr(provider, "_request", request)
+    monkeypatch.setattr(
+        provider,
+        "_client",
+        lambda: httpx.AsyncClient(
+            base_url="http://provider.example",
+            transport=httpx.MockTransport(handler),
+            headers={"Authorization": "Bearer provider-token-that-is-long-enough"},
+        ),
+    )
+    ref = ContentRef("42", "https://m.weibo.cn/status/42")
+
+    staged = await provider.stage(Platform.weibo, ref)
+
+    assert staged.downloaded_media_count == 1
+    assert (staged.local_root / staged.media[0]["local_path"]).read_bytes() == media_bytes
+    await provider.cleanup(staged)
+    assert not staged.local_root.exists()

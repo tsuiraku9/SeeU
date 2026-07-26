@@ -68,7 +68,7 @@ from .schemas import (
 )
 from .scheduler import create_scheduler
 from .rebuild import reconcile_legacy_content_index, restore_account_ledgers
-from .provider import CrawlerProvider, ProviderError, ProviderExecutionError, ProviderUnavailableError
+from .provider import HttpProvider, ProviderError, ProviderExecutionError, ProviderUnavailableError
 from .security import (
     login_rate_limiter,
     new_csrf_token,
@@ -82,7 +82,7 @@ settings = get_settings()
 logger = logging.getLogger(__name__)
 collector = CollectorService(settings)
 scheduler = create_scheduler(collector)
-provider = CrawlerProvider(settings)
+provider = HttpProvider(settings)
 
 IMPORT_MULTIPART_OVERHEAD_BYTES = 2 * 1024 * 1024
 IMPORT_TEXT_PART_MAX_BYTES = 16 * 1024
@@ -259,15 +259,16 @@ def health(db: DbSession) -> dict:
 def capabilities(request: Request, db: DbSession) -> dict:
     require_session(request, db)
     return {
-        "provider": "mediacrawler",
-        "discovery_limit": settings.crawler_discovery_limit,
+        "provider": {
+            "mode": "external_http",
+            "configured": settings.provider_configured,
+            "contract_version": 1,
+        },
+        "discovery_limit": settings.provider_discovery_limit,
         "strict_media_completeness": True,
         "account_ledger_recovery": True,
         "archive_manifest_schema": 2,
         "fake_ip_dns_enabled": settings.allow_fake_ip_dns,
-        "manual_verification_url": (
-            f"http://{settings.novnc_url_host}:{settings.novnc_port}"
-        ),
     }
 
 
@@ -280,6 +281,8 @@ def provider_http_error(exc: ProviderError) -> HTTPException:
 async def platform_sessions(request: Request, response: Response, db: DbSession) -> list[dict]:
     require_session(request, db)
     response.headers["Cache-Control"] = "no-store, max-age=0"
+    if not settings.provider_configured:
+        return []
     try:
         return await provider.sessions()
     except ProviderError as exc:

@@ -473,7 +473,7 @@ function AutoPlatformSessions({ accounts, setError, onImported }: { accounts: Ac
   const needsManualVerification = activeSession?.status === "manual_verification_required";
 
   return <div className="view-stack">
-    <header className="page-heading"><div><p className="eyebrow">平台会话</p><h1>平台登录</h1></div><p>点击登录后，二维码会直接显示在当前页面。登录状态按平台隔离，系统不会接收、记录或返回 Cookie。</p></header>
+    <header className="page-heading"><div><p className="eyebrow">外部 Provider</p><h1>平台登录</h1></div><p>二维码和人工验证由独立部署的 Provider 提供。SeeU 不安装采集器，也不会接收、记录或返回 Cookie。</p></header>
     <section className="session-grid" aria-busy={loading}>{sessions.map(session => {
       const waitingForQr = session.status === "starting" || session.status === "qr_ready";
       const loginLabel = waitingForQr ? "等待扫码" : session.status === "authenticated" ? "重新登录" : "开始登录";
@@ -487,13 +487,13 @@ function AutoPlatformSessions({ accounts, setError, onImported }: { accounts: Ac
       </article>;
     })}</section>
     {loading && !sessions.length && <div className="session-grid skeleton-grid" role="status" aria-label="正在读取平台登录状态"><span className="session-skeleton" /><span className="session-skeleton" /><span className="session-skeleton" /><span className="session-skeleton" /></div>}
-    {!loading && !sessions.length && <Empty text="采集服务暂不可用，请检查 Docker 健康状态" />}
+    {!loading && !sessions.length && <Empty text="尚未配置外部 Provider，或 Provider 未声明可管理的平台会话" />}
     {activePlatform && <section ref={loginPanelRef} className={`panel qr-panel ${loginComplete ? "login-complete" : loginFailed ? "login-failed" : ""}`} role={loginFailed ? "alert" : "status"} aria-live={loginFailed ? "assertive" : "polite"} aria-busy={loginPreparing} aria-labelledby="platform-login-title" tabIndex={-1}>
       <div className="qr-panel-copy">
         <p className="eyebrow">{loginComplete ? "登录完成" : loginFailed ? "登录遇到问题" : qr?.image_data_url ? "扫码登录" : "正在生成二维码"}</p>
         <h2 id="platform-login-title">{loginComplete ? `${platformNames[activePlatform]} 登录成功` : loginFailed ? `${platformNames[activePlatform]} 登录未完成` : qr?.image_data_url ? `使用 ${platformNames[activePlatform]} App 扫码` : `正在准备 ${platformNames[activePlatform]} 登录二维码`}</h2>
-        <p className="muted">{loginComplete ? "登录状态已安全保存在服务器，可以开始测试和采集账号。" : loginFailed ? loginError || activeSession?.message || "二维码已失效或平台要求额外验证，请重新尝试。" : qr?.image_data_url ? "请在二维码失效前完成扫码；登录成功后，本页会自动更新。" : "平台浏览器正在服务器内启动，二维码生成后会自动显示在这里。"}</p>
-        {needsManualVerification && activeSession?.manual_verification_url && <div className="manual-verification"><a className="button-link" href={activeSession.manual_verification_url} target="_blank" rel="noreferrer">打开本机 noVNC 完成人工验证 <span aria-hidden="true">↗</span></a><small>noVNC 默认仅监听 127.0.0.1:7900；远程部署时请先通过 SSH 转发该端口。</small></div>}
+        <p className="muted">{loginComplete ? "登录状态已保存在外部 Provider，可以开始测试和采集账号。" : loginFailed ? loginError || activeSession?.message || "二维码已失效或平台要求额外验证，请重新尝试。" : qr?.image_data_url ? "请在二维码失效前完成扫码；登录成功后，本页会自动更新。" : "外部 Provider 正在准备平台会话，二维码生成后会自动显示在这里。"}</p>
+        {needsManualVerification && activeSession?.manual_verification_url && <div className="manual-verification"><a className="button-link" href={activeSession.manual_verification_url} target="_blank" rel="noreferrer">打开 Provider 人工验证界面 <span aria-hidden="true">↗</span></a><small>该地址由外部 Provider 提供；请按照 Provider 的部署文档安全访问。</small></div>}
         <div className="qr-panel-actions">
           {loginComplete ? <button type="button" className="secondary" onClick={closeLoginPanel}>完成</button> : loginFailed ? <><button type="button" className="primary" disabled={!!busy} onClick={() => void sessionAction(activePlatform, "login")}>{busy === `${activePlatform}-login` ? "正在重试…" : "重新获取二维码"}</button><button type="button" className="ghost" disabled={!!busy} onClick={() => activeSession?.status === "starting" || activeSession?.status === "qr_ready" ? void sessionAction(activePlatform, "logout") : closeLoginPanel()}>{activeSession?.status === "starting" || activeSession?.status === "qr_ready" ? "取消登录" : "关闭"}</button></> : <button type="button" className="ghost" disabled={!!busy} onClick={() => void sessionAction(activePlatform, "logout")}>取消登录</button>}
         </div>

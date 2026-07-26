@@ -17,11 +17,11 @@ The repository must not be made public until every blocking item is complete.
   enabled.
 - Security reporting, contribution rules, ownership, and issue templates are
   documented.
-- SeeU's original source code is licensed under the MIT License, while
-  MediaCrawler and its derived compatibility backport are explicitly excluded
-  and retain their upstream non-commercial license.
-- MediaCrawler's complete NON-COMMERCIAL LEARNING LICENSE 1.1 is included, and
-  the derived compatibility backport is explicitly kept under that license.
+- SeeU source code is licensed under the MIT License.
+- No MediaCrawler source, derived override, license copy, build instruction, or
+  prebuilt provider image is present in the release tree.
+- External providers are clearly documented as separately installed and
+  separately licensed programs.
 
 ## Immediately before changing visibility
 
@@ -29,11 +29,14 @@ The repository must not be made public until every blocking item is complete.
    secret scan on the exact commit that will become public.
 2. Confirm no test account, monitoring URL, QR code, Cookie, browser profile,
    `.env`, database, log, archive, or generated content is tracked.
-3. Reconfirm the dependency graph and security updates, then enable private
+3. Confirm no provider source or provider-derived file is present in the full
+   reachable Git history; removing a file only from the latest tree is not
+   sufficient.
+4. Reconfirm the dependency graph and security updates, then enable private
    vulnerability reporting, secret scanning, push protection, and CodeQL
    default setup where GitHub exposes them.
-4. Configure a `main` ruleset requiring the CI checks and pull-request review.
-5. Require approval before workflows from first-time or outside contributors
+5. Configure a `main` ruleset requiring the CI checks and pull-request review.
+6. Require approval before workflows from first-time or outside contributors
    run.
-6. Treat public exposure as irreversible: forks and cached copies may remain
+7. Treat public exposure as irreversible: forks and cached copies may remain
    public even if the repository is later made private.

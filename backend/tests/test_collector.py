@@ -95,7 +95,7 @@ async def test_first_poll_archives_only_newest_history_and_second_archives_only_
             "code": "provider_unavailable",
             "phase": None,
             "retryable": None,
-            "message": "Crawler provider is disabled",
+            "message": "External provider is not configured",
         },
     }
     with SessionLocal() as db:
@@ -515,7 +515,7 @@ async def test_fallback_failure_preserves_primary_provider_diagnostics(monkeypat
     assert result.status == JobStatus.failed
     assert "primary-secret" not in (result.error or "")
     assert "fallback-secret" not in (result.error or "")
-    assert "MediaCrawler discovery failed" in (result.error or "")
+    assert "External provider discovery failed" in (result.error or "")
     assert "fallback discovery failed" in (result.error or "")
     assert result.details == {
         "provider_path": "fallback",
@@ -568,7 +568,7 @@ async def test_non_fallback_provider_failure_preserves_structured_diagnostics(mo
     assert result.status == JobStatus.failed
     assert result.error == "session expired"
     assert result.details == {
-        "provider_path": "mediacrawler",
+        "provider_path": "external_http",
         "primary_provider_failure": {
             "code": "login_required",
             "phase": "session",
