@@ -1,4 +1,4 @@
-FROM node:22-alpine AS frontend-builder
+FROM node:26-alpine AS frontend-builder
 WORKDIR /build/frontend
 COPY frontend/package.json frontend/pnpm-lock.yaml frontend/pnpm-workspace.yaml frontend/tsconfig*.json frontend/vite.config.ts frontend/index.html ./
 COPY frontend/src ./src
