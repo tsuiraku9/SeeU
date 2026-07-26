@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+# SPDX-License-Identifier: LicenseRef-MediaCrawler-NON-COMMERCIAL-LEARNING-1.1
 # Copyright (c) 2025 relakkes@gmail.com
 #
 # Backported from NanmiCoder/MediaCrawler commit 17f66121e0fcc40fc23958b995bec873d422667d.
