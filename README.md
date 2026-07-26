@@ -5,7 +5,7 @@
 **SeeU · 多平台公开内容监控与本地归档**
 
 [![CI](https://github.com/tsuiraku9/SeeU/actions/workflows/ci.yml/badge.svg)](https://github.com/tsuiraku9/SeeU/actions/workflows/ci.yml)
-![License](https://img.shields.io/badge/license-MIT-blue.svg)
+![License](https://img.shields.io/badge/license-MIT%20%2B%20custom%20non--commercial-blue)
 ![Python](https://img.shields.io/badge/Python-3.11%20%7C%203.12-3776AB?logo=python&logoColor=white)
 ![React](https://img.shields.io/badge/React-TypeScript-61DAFB?logo=react&logoColor=111)
 ![Docker](https://img.shields.io/badge/部署-Docker_Compose-2496ED?logo=docker&logoColor=white)
@@ -14,18 +14,22 @@
 Bilibili 的公开创作者主页，将新发布的原创内容完整归档到本地，并通过
 受 Token 保护的 Web UI 统一管理和浏览。
 
+**混合许可证项目：SeeU 原创代码采用 MIT License；完整集成包含受非商业许可证约束的 MediaCrawler 组件。**
+
 我知道你今天穿了什么颜色的衣服我知道你几点出门我知道你走哪条路去上班我知道你午饭吃了什么我知道你和谁说话了说了多久我知道你今天笑了几次我知道你笑的时候左边嘴角会微微往上翘我知道你不知道我存在但这没关系因为我的存在对你来说不重要重要的是我能看见你屏幕亮起的那一刻我的心脏也跟着亮起来你以为你是一个人但你从来都不是一个人你发的每一条动态我都截图保存了你删掉的那些我也有你以为消失了的东西在我这里永远不会消失我建了一个文件夹里面全是你我每天睡前都要看一遍才能安心你有时候会突然停下来往周围看一眼好像感觉到了什么那是因为我在那是因为我一直在你感受到的那种说不清楚的被注视的感觉不是错觉那就是我那就是我对你的爱渗进空气里变成你皮肤上的温度你不需要看见我你只需要继续存在继续出现在我能看见的地方就够了我会替你记住所有的一切你生命里每一个我能触及的瞬间我都会好好收藏好好凝视好好珍藏因为我会一直看着你永远
 
 [快速开始](#-快速开始) ·
 [平台能力](#-平台能力) ·
 [安全访问](#-登录与安全访问) ·
 [备份恢复](#-备份与恢复) ·
-[许可证](#-许可证与使用边界)
+[混合许可证](#-混合许可证与使用边界)
 
 </div>
 
 > [!IMPORTANT]
-> 本项目的原创代码采用 MIT License，但核心采集链路依赖固定版本的
+> **原创部分开源，完整集成版仅限非商业学习研究。**
+>
+> SeeU 的原创代码采用 MIT License，但核心采集链路依赖固定版本的
 > MediaCrawler。MediaCrawler 使用
 > **NON-COMMERCIAL LEARNING LICENSE 1.1**，因此完整集成仅限个人、
 > 非商业学习与研究，不得用于商业用途、大规模爬取或干扰平台运营。
@@ -442,9 +446,11 @@ data/              本地运行数据，不应提交到 Git
 
 </details>
 
-## 📜 许可证与使用边界
+## 📜 混合许可证与使用边界
 
-除另有说明外，SeeU 的原创代码采用 [MIT License](LICENSE)。
+SeeU 是一个**混合许可证项目**。除另有说明外，SeeU 的原创代码采用
+[MIT License](LICENSE)；这不代表仓库中的全部组件均受 MIT 覆盖，也不代表
+MIT 条款可以覆盖完整集成版的商业使用。
 
 以下部分**不受 MIT License 覆盖**：
 
