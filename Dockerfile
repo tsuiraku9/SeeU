@@ -5,7 +5,7 @@ COPY frontend/src ./src
 RUN corepack enable && pnpm install --frozen-lockfile
 RUN pnpm build
 
-FROM python:3.12-slim
+FROM python:3.14-slim
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PYTHONPATH=/app/backend \
