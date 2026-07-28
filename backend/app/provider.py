@@ -120,6 +120,7 @@ class HttpProvider:
 
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
+        self._json_client: httpx.AsyncClient | None = None
 
     def _client(self) -> httpx.AsyncClient:
         if not self.settings.provider_configured:
@@ -132,7 +133,25 @@ class HttpProvider:
                 "User-Agent": "SeeU-Provider-Client/1",
             },
             follow_redirects=False,
+            limits=httpx.Limits(
+                max_connections=8,
+                max_keepalive_connections=4,
+                keepalive_expiry=30,
+            ),
         )
+
+    def _request_client(self) -> httpx.AsyncClient:
+        client = self._json_client
+        if client is None or client.is_closed:
+            client = self._client()
+            self._json_client = client
+        return client
+
+    async def aclose(self) -> None:
+        client = self._json_client
+        self._json_client = None
+        if client is not None and not client.is_closed:
+            await client.aclose()
 
     @staticmethod
     def _redact_detail(value: object) -> str:
@@ -194,8 +213,7 @@ class HttpProvider:
 
     async def _request(self, method: str, path: str, **kwargs: Any) -> Any:
         try:
-            async with self._client() as client:
-                response = await client.request(method, path, **kwargs)
+            response = await self._request_client().request(method, path, **kwargs)
         except ProviderError:
             raise
         except httpx.HTTPError as exc:

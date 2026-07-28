@@ -209,6 +209,8 @@ async def lifespan(_app: FastAPI):
         if initial_poll_task is not None and not initial_poll_task.done():
             initial_poll_task.cancel()
             await asyncio.gather(initial_poll_task, return_exceptions=True)
+        await provider.aclose()
+        await collector.provider.aclose()
 
 
 app = FastAPI(title=settings.app_name, version="0.4.0", lifespan=lifespan)

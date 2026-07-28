@@ -60,6 +60,38 @@ async def test_request_preserves_structured_provider_error_metadata(monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_json_requests_reuse_a_bounded_http_client(monkeypatch):
+    settings = get_settings().model_copy(
+        update={
+            "provider_base_url": "http://provider.example",
+            "provider_api_token": "provider-token-that-is-long-enough",
+        }
+    )
+    provider = HttpProvider(settings)
+    clients: list[httpx.AsyncClient] = []
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"status": "ok"})
+
+    def make_client() -> httpx.AsyncClient:
+        client = httpx.AsyncClient(
+            base_url=settings.provider_base_url,
+            transport=httpx.MockTransport(handler),
+        )
+        clients.append(client)
+        return client
+
+    monkeypatch.setattr(provider, "_client", make_client)
+
+    assert await provider._request("GET", "/v1/health") == {"status": "ok"}
+    assert await provider._request("GET", "/v1/health") == {"status": "ok"}
+    assert len(clients) == 1
+
+    await provider.aclose()
+    assert clients[0].is_closed
+
+
+@pytest.mark.asyncio
 async def test_discovery_orders_complete_publication_times_newest_first(monkeypatch):
     provider = HttpProvider(get_settings())
 
