@@ -76,6 +76,27 @@ def test_provider_discovery_limit_rejects_values_below_ten() -> None:
         Settings(provider_discovery_limit=9)
 
 
+def test_low_bandwidth_deployments_can_raise_media_timeouts() -> None:
+    settings = Settings(
+        provider_request_timeout_seconds=7200,
+        download_process_timeout_seconds=7200,
+    )
+    assert settings.provider_request_timeout_seconds == 7200
+    assert settings.download_process_timeout_seconds == 7200
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("provider_request_timeout_seconds", 7201),
+        ("download_process_timeout_seconds", 14401),
+    ],
+)
+def test_media_timeouts_remain_bounded(field: str, value: int) -> None:
+    with pytest.raises(ValidationError):
+        Settings(**{field: value})
+
+
 @pytest.mark.parametrize("value", [0, 65536])
 def test_webui_port_must_be_a_valid_tcp_port(value: int) -> None:
     with pytest.raises(ValidationError):

@@ -32,9 +32,10 @@ class Settings(BaseSettings):
     provider_staging_root: Path = Path("data/provider-staging")
     provider_base_url: str = ""
     provider_api_token: str = Field(default="", repr=False)
-    provider_request_timeout_seconds: int = Field(default=900, ge=5, le=900)
+    provider_request_timeout_seconds: int = Field(default=900, ge=5, le=7200)
     provider_discovery_limit: int = Field(default=10, ge=10, le=500)
     provider_poll_concurrency: int = Field(default=1, ge=1, le=4)
+    scheduler_batch_size: int = Field(default=4, ge=1, le=100)
     allow_fake_ip_dns: bool = False
     import_max_bytes: int = Field(default=2 * 1024**3, ge=1024)
     import_max_files: int = Field(default=100, ge=1, le=1000)
@@ -42,9 +43,10 @@ class Settings(BaseSettings):
     poll_jitter_minutes: int = Field(default=5, ge=0, le=30)
     min_free_disk_gb: float = Field(default=5.0, ge=0.1)
     request_timeout_seconds: int = Field(default=30, ge=5, le=120)
-    download_process_timeout_seconds: int = Field(default=900, ge=30, le=3600)
+    download_process_timeout_seconds: int = Field(default=900, ge=30, le=14400)
     media_max_bytes: int = Field(default=2 * 1024**3, ge=1024)
     download_concurrency: int = Field(default=2, ge=1, le=8)
+    archive_size_cache_seconds: int = Field(default=300, ge=5, le=3600)
     scheduler_enabled: bool = True
     app_name: str = "我会一直看着你"
 

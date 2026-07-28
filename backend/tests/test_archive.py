@@ -1,5 +1,6 @@
 import asyncio
 import json
+import threading
 from datetime import datetime, timezone
 
 import pytest
@@ -9,6 +10,95 @@ from app.adapters.base import MediaCandidate, NormalizedContent
 from app.archive import ArchiveError, ArchiveManager
 from app.config import get_settings
 from app.models import Platform
+
+
+def test_storage_status_caches_recursive_archive_scan(monkeypatch):
+    settings = get_settings()
+    monkeypatch.setattr(settings, "archive_size_cache_seconds", 300)
+    manager = ArchiveManager(settings)
+    first = manager.root / "bilibili" / "account" / "2026" / "07" / "one.bin"
+    first.parent.mkdir(parents=True)
+    first.write_bytes(b"1234")
+
+    initial = manager.storage_status()
+    second = first.with_name("two.bin")
+    second.write_bytes(b"567890")
+    cached = manager.storage_status()
+
+    assert initial["archive_bytes"] == 4
+    assert cached["archive_bytes"] == 4
+    manager._invalidate_storage_cache()
+    assert manager.storage_status()["archive_bytes"] == 10
+
+
+@pytest.mark.asyncio
+async def test_staged_file_promotion_runs_off_the_event_loop(monkeypatch):
+    settings = get_settings()
+    manager = ArchiveManager(settings)
+    started = threading.Event()
+    release = threading.Event()
+
+    def blocking_archive(*_args, **_kwargs):
+        started.set()
+        release.wait(timeout=5)
+        return settings.archive_root, {}
+
+    monkeypatch.setattr(manager, "archive_from_files", blocking_archive)
+    content = NormalizedContent(
+        platform=Platform.weibo,
+        remote_id="offloaded",
+        source_url="https://m.weibo.cn/status/offloaded",
+        title="offloaded",
+        author="author",
+        text="body",
+        published_at=datetime(2026, 7, 10, tzinfo=timezone.utc),
+        content_type="text",
+    )
+    task = asyncio.create_task(
+        manager.archive_from_files_async(content, "author", settings.archive_root, [])
+    )
+    while not started.is_set():
+        await asyncio.sleep(0)
+    # This timer can run only if the blocking worker did not occupy the event loop.
+    await asyncio.wait_for(asyncio.sleep(0.01), timeout=0.2)
+    release.set()
+    await task
+
+
+@pytest.mark.asyncio
+async def test_cancelled_staged_promotion_waits_for_worker_before_cleanup(monkeypatch):
+    settings = get_settings()
+    manager = ArchiveManager(settings)
+    started = threading.Event()
+    release = threading.Event()
+
+    def blocking_archive(*_args, **_kwargs):
+        started.set()
+        release.wait(timeout=5)
+        return settings.archive_root, {}
+
+    monkeypatch.setattr(manager, "archive_from_files", blocking_archive)
+    content = NormalizedContent(
+        platform=Platform.weibo,
+        remote_id="cancelled-offload",
+        source_url="https://m.weibo.cn/status/cancelled-offload",
+        title="offloaded",
+        author="author",
+        text="body",
+        published_at=datetime(2026, 7, 10, tzinfo=timezone.utc),
+        content_type="text",
+    )
+    task = asyncio.create_task(
+        manager.archive_from_files_async(content, "author", settings.archive_root, [])
+    )
+    while not started.is_set():
+        await asyncio.sleep(0)
+    task.cancel()
+    await asyncio.sleep(0.01)
+    assert not task.done()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
 
 
 @pytest.mark.asyncio

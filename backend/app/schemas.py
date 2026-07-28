@@ -134,5 +134,22 @@ class StorageOut(BaseModel):
     downloads_paused: bool
 
 
+class SystemSettingsOut(BaseModel):
+    scheduler_enabled: bool
+    provider_configured: bool
+    provider_discovery_limit: int
+    provider_poll_concurrency: int
+    scheduler_batch_size: int
+    download_concurrency: int
+    archive_size_cache_seconds: int
+    min_free_disk_gb: float
+    media_max_bytes: int
+    provider_request_timeout_seconds: int
+    request_timeout_seconds: int
+    download_process_timeout_seconds: int
+    poll_jitter_minutes: int
+    database_journal_mode: str
+
+
 class MessageOut(BaseModel):
     message: str

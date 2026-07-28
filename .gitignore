@@ -32,6 +32,7 @@ frontend/vite.config.d.ts
 # All runtime data may contain archived content, login profiles, signed URLs,
 # SQLite state, QR handoff state, or generated diagnostics.
 data/
+.e2e/
 *.log
 *.log.*
 logs/

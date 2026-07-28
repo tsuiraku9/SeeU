@@ -503,7 +503,7 @@ class CollectorService:
                 title=staged.title, author=staged.author, text=staged.text,
                 published_at=staged.published_at, content_type=staged.content_type,
             )
-            archive_path, metadata = self.archive.archive_from_files(
+            archive_path, metadata = await self.archive.archive_from_files_async(
                 content,
                 account_slug,
                 staged.local_root,
@@ -562,7 +562,7 @@ class CollectorService:
                     select(Account.id).where(
                         Account.enabled.is_(True),
                         (Account.next_poll_at.is_(None)) | (Account.next_poll_at <= now),
-                    )
+                    ).order_by(Account.next_poll_at.asc()).limit(self.settings.scheduler_batch_size)
                 )
             )
         async def poll_one(account_id: int) -> None:

@@ -131,6 +131,112 @@ a {
   line-height: 1.65;
 }
 
+.settings-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.25fr);
+  gap: 18px;
+  align-items: start;
+}
+
+.settings-saved {
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.settings-form {
+  display: grid;
+  gap: 18px;
+  margin-top: 22px;
+}
+
+.settings-form > label {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 150px;
+  gap: 5px 18px;
+  align-items: center;
+}
+
+.settings-form > label > span {
+  color: var(--ink-strong);
+  font-weight: 700;
+}
+
+.settings-form > label > small {
+  grid-column: 1;
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.settings-form > label > select {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+}
+
+.settings-form .toggle-setting {
+  grid-template-columns: minmax(0, 1fr) auto;
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
+}
+
+.toggle-setting > span {
+  display: grid;
+  gap: 5px;
+}
+
+.toggle-setting > span small {
+  color: var(--muted);
+  font-weight: 400;
+  line-height: 1.45;
+}
+
+.toggle-setting input {
+  width: 42px;
+  height: 22px;
+  accent-color: var(--accent);
+}
+
+.system-config-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1px;
+  overflow: hidden;
+  margin: 22px 0 0;
+  background: var(--line);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+}
+
+.system-config-grid > div {
+  min-width: 0;
+  display: grid;
+  gap: 7px;
+  padding: 14px;
+  background: var(--surface);
+}
+
+.system-config-grid span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.system-config-grid strong {
+  overflow: hidden;
+  color: var(--ink-strong);
+  font-size: 14px;
+  text-overflow: ellipsis;
+}
+
+.settings-note {
+  margin: 18px 0 0;
+  padding: 13px 14px;
+  color: var(--muted);
+  background: var(--surface-soft);
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
 .primary,
 .secondary,
 .ghost,
@@ -2399,6 +2505,10 @@ td strong {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
+  .settings-layout {
+    grid-template-columns: 1fr;
+  }
+
   .account-card {
     grid-template-columns: 1fr;
   }
@@ -2546,7 +2656,7 @@ td strong {
     inset: auto 0 0;
     min-height: 68px;
     display: grid;
-    grid-template-columns: repeat(5, 1fr);
+    grid-template-columns: repeat(6, 1fr);
     padding: 6px 6px calc(6px + env(safe-area-inset-bottom));
     background: rgba(252, 253, 252, .94);
     border-top: 1px solid var(--line);
@@ -2653,6 +2763,10 @@ td strong {
   .media-gallery {
     grid-template-columns: 1fr;
   }
+
+  .settings-form > label {
+    grid-template-columns: minmax(0, 1fr) 140px;
+  }
 }
 
 @media (max-width: 760px) and (min-width: 601px) {
@@ -2690,6 +2804,25 @@ td strong {
 }
 
 @media (max-width: 600px) {
+  .settings-form > label,
+  .settings-form .toggle-setting {
+    grid-template-columns: 1fr;
+  }
+
+  .settings-form > label > select {
+    grid-column: 1;
+    grid-row: auto;
+    margin-top: 5px;
+  }
+
+  .toggle-setting input {
+    margin-top: 5px;
+  }
+
+  .system-config-grid {
+    grid-template-columns: 1fr;
+  }
+
   .login-shell {
     display: block;
     min-height: 100dvh;

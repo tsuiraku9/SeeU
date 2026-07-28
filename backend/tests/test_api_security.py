@@ -94,6 +94,20 @@ def test_login_csrf_and_authenticated_api():
         assert client.get("/api/accounts").json()[0]["platform"] == "bilibili"
 
 
+def test_system_settings_exposes_tuning_without_secrets():
+    with TestClient(app) as client:
+        assert login(client).status_code == 200
+        response = client.get("/api/system-settings")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["database_journal_mode"] == "wal"
+    assert payload["scheduler_batch_size"] >= 1
+    assert payload["archive_size_cache_seconds"] >= 5
+    assert "provider_api_token" not in payload
+    assert "webui_login_token" not in payload
+
+
 def test_unicode_login_token_uses_utf8_constant_time_comparison(monkeypatch):
     settings = get_settings()
     unicode_token = "本地登录令牌" * 5

@@ -1,17 +1,17 @@
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { API_UNAUTHORIZED_EVENT, ApiError, api, clearAuth, normalizePage, saveAuth } from "./api";
-import type { Account, AccountTestResult, AuthResponse, Content, ContentDetail, CrawlRun, PageResponse, Platform, PlatformSession, StorageInfo, Summary } from "./types";
+import { loadUiPreferences, saveUiPreferences } from "./preferences";
+import type { UiPreferences } from "./preferences";
+import type { Account, AccountTestResult, AuthResponse, Content, ContentDetail, CrawlRun, PageResponse, Platform, PlatformSession, StorageInfo, Summary, SystemSettings } from "./types";
 import { formatBytes, formatDate, mediaUrl, platformNames } from "./utils";
 
-type View = "overview" | "feed" | "accounts" | "sessions" | "runs";
+type View = "overview" | "feed" | "accounts" | "sessions" | "runs" | "settings";
 type FeedFilters = { platform: string; account: string; query: string };
 const platforms: Platform[] = ["bilibili", "weibo", "douyin", "xiaohongshu"];
 const appTitle = "我会一直看着你";
 const emptyFeedFilters: FeedFilters = { platform: "", account: "", query: "" };
-const CONTENT_PAGE_SIZE = 24;
-const RUN_PAGE_SIZE = 50;
 
-type IconName = "overview" | "archive" | "accounts" | "sessions" | "runs" | "arrow" | "plus" | "close";
+type IconName = "overview" | "archive" | "accounts" | "sessions" | "runs" | "settings" | "arrow" | "plus" | "close";
 
 const statusNames: Record<string, string> = {
   pending: "待初始化",
@@ -50,6 +50,7 @@ function Icon({ name, size = 18 }: { name: IconName; size?: number }) {
   if (name === "accounts") return <svg {...common}><circle cx="9" cy="8" r="3.25" /><path d="M3.5 20v-1.5A5.5 5.5 0 0 1 9 13h0a5.5 5.5 0 0 1 5.5 5.5V20M16 7.5h5M18.5 5v5" /></svg>;
   if (name === "sessions") return <svg {...common}><rect x="4" y="3" width="16" height="18" rx="3" /><path d="M8 8h8M8 12h5M9 17h6" /></svg>;
   if (name === "runs") return <svg {...common}><path d="M20 11a8 8 0 1 0-2.34 5.66L20 14.3" /><path d="M20 7v4h-4M12 7v5l3 2" /></svg>;
+  if (name === "settings") return <svg {...common}><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.86 2.86-.06-.06A1.7 1.7 0 0 0 15 19.4a1.7 1.7 0 0 0-1 .6 1.7 1.7 0 0 0-.4 1V21H9.55v-.08A1.7 1.7 0 0 0 8.5 19.4a1.7 1.7 0 0 0-1.88.34l-.06.06-2.86-2.86.06-.06A1.7 1.7 0 0 0 4.1 15a1.7 1.7 0 0 0-.6-1 1.7 1.7 0 0 0-1-.4H2.4V9.55h.08A1.7 1.7 0 0 0 4.1 8.5a1.7 1.7 0 0 0-.34-1.88l-.06-.06L6.56 3.7l.06.06A1.7 1.7 0 0 0 8.5 4.1a1.7 1.7 0 0 0 1-.6 1.7 1.7 0 0 0 .4-1V2.4h4.05v.08A1.7 1.7 0 0 0 15 4.1a1.7 1.7 0 0 0 1.88-.34l.06-.06 2.86 2.86-.06.06A1.7 1.7 0 0 0 19.4 8.5a1.7 1.7 0 0 0 .6 1 1.7 1.7 0 0 0 1 .4h.08v4.05H21a1.7 1.7 0 0 0-1.6 1.05Z" /></svg>;
   if (name === "arrow") return <svg {...common}><path d="m9 18 6-6-6-6" /></svg>;
   if (name === "plus") return <svg {...common}><path d="M12 5v14M5 12h14" /></svg>;
   return <svg {...common}><path d="m6 6 12 12M18 6 6 18" /></svg>;
@@ -395,11 +396,14 @@ function AutoPlatformSessions({ accounts, setError, onImported }: { accounts: Ac
     let timer: number | undefined;
     async function poll() {
       await reload();
-      if (!cancelled) timer = window.setTimeout(() => void poll(), 1500);
+      if (!cancelled) {
+        const delay = activePlatform ? 1500 : 15000;
+        timer = window.setTimeout(() => void poll(), delay);
+      }
     }
     void poll();
     return () => { mountedRef.current = false; cancelled = true; if (timer !== undefined) window.clearTimeout(timer); reloadSequence.current += 1; };
-  }, [reload]);
+  }, [activePlatform, reload]);
 
   useEffect(() => {
     if (!activePlatform || !loginPanelRef.current) return;
@@ -515,16 +519,55 @@ function Runs({ runs, accounts, page, onPage, loading }: { runs: CrawlRun[]; acc
   return <div className="view-stack"><header className="page-heading"><div><p className="eyebrow">采集活动</p><h1>任务记录</h1></div><p>查看每次轮询的发现、归档与诊断结果。单条内容失败不会阻塞同账号的其他新增内容。</p></header><section className="panel table-wrap">{loading && !runs.length ? <div className="table-loading"><LoadingRows /><LoadingRows /><LoadingRows /></div> : <><table><caption className="sr-only">账号采集任务记录</caption><thead><tr><th scope="col">账号</th><th scope="col">开始时间</th><th scope="col">状态</th><th scope="col">发现</th><th scope="col">归档</th><th scope="col">诊断</th></tr></thead><tbody>{runs.map(run => <tr key={run.id}><td data-label="账号"><strong>{accountMap.get(run.account_id) || `#${run.account_id}`}</strong></td><td data-label="开始时间">{formatDate(run.started_at)}</td><td data-label="状态"><span className={`status ${run.status}`}>{statusName(run.status)}</span></td><td data-label="发现">{run.discovered_count}</td><td data-label="归档">{run.archived_count}</td><td data-label="诊断" className="error-cell">{run.error || "—"}</td></tr>)}</tbody></table>{!runs.length && <Empty text="暂无任务记录" />}<Pagination total={page.total} offset={page.offset} limit={page.limit} hasMore={page.has_more} loading={loading} onPage={onPage} label="任务记录" /></>}</section></div>;
 }
 
-function MediaPreview({ item, contentId, title, index }: { item: ContentDetail["metadata"]["media"][number]; contentId: number; title: string; index: number }) {
+function SettingsView({ system, loading, preferences, onChange }: { system: SystemSettings | null; loading: boolean; preferences: UiPreferences; onChange: (value: UiPreferences) => void }) {
+  const update = <K extends keyof UiPreferences>(key: K, value: UiPreferences[K]) => onChange({ ...preferences, [key]: value });
+  const systemItems = system ? [
+    ["调度器", system.scheduler_enabled ? "已启用" : "已停用"],
+    ["外部 Provider", system.provider_configured ? "已配置" : "未配置"],
+    ["发现窗口", `${system.provider_discovery_limit} 条`],
+    ["采集并发", `${system.provider_poll_concurrency}`],
+    ["单轮账号上限", `${system.scheduler_batch_size}`],
+    ["下载并发", `${system.download_concurrency}`],
+    ["归档体积缓存", `${system.archive_size_cache_seconds} 秒`],
+    ["最小剩余磁盘", `${system.min_free_disk_gb} GiB`],
+    ["单条媒体上限", formatBytes(system.media_max_bytes)],
+    ["Provider 超时", `${system.provider_request_timeout_seconds} 秒`],
+    ["页面请求超时", `${system.request_timeout_seconds} 秒`],
+    ["下载进程超时", `${system.download_process_timeout_seconds} 秒`],
+    ["调度抖动", `${system.poll_jitter_minutes} 分钟`],
+    ["SQLite 日志模式", system.database_journal_mode.toUpperCase()],
+  ] : [];
+  return <div className="view-stack">
+    <header className="page-heading"><div><p className="eyebrow">资源与偏好</p><h1>系统设置</h1></div><p>把页面请求量和媒体预加载控制在服务器与 3Mbps 带宽能够承受的范围内。</p></header>
+    <section className="settings-layout">
+      <article className="panel settings-panel">
+        <div className="panel-title"><div><p className="eyebrow">当前浏览器</p><h2>Web UI 偏好</h2></div><span className="settings-saved">自动保存</span></div>
+        <div className="settings-form">
+          <label><span>自动刷新</span><small>关闭后仍可通过切换页面或筛选手动读取最新数据。</small><select value={preferences.refreshSeconds} onChange={event => update("refreshSeconds", Number(event.target.value))}><option value={0}>关闭</option><option value={30}>30 秒</option><option value={60}>60 秒（推荐）</option><option value={120}>2 分钟</option><option value={300}>5 分钟</option></select></label>
+          <label><span>每页归档数量</span><small>更小的分页可降低 SQLite 查询和浏览器渲染压力。</small><select value={preferences.contentPageSize} onChange={event => update("contentPageSize", Number(event.target.value))}><option value={12}>12 条</option><option value={24}>24 条（推荐）</option><option value={48}>48 条</option></select></label>
+          <label><span>每页任务数量</span><small>仅进入任务记录时读取。</small><select value={preferences.runPageSize} onChange={event => update("runPageSize", Number(event.target.value))}><option value={25}>25 条</option><option value={50}>50 条（推荐）</option><option value={100}>100 条</option></select></label>
+          <label className="toggle-setting"><span><strong>低带宽模式</strong><small>打开详情时不预取视频和音频元数据，点击播放后才传输。</small></span><input type="checkbox" checked={preferences.lowBandwidth} onChange={event => update("lowBandwidth", event.target.checked)} /></label>
+        </div>
+      </article>
+      <article className="panel settings-panel">
+        <div className="panel-title"><div><p className="eyebrow">服务端</p><h2>生效配置</h2></div><span className={`status ${system?.provider_configured ? "healthy" : "paused"}`}>{system?.provider_configured ? "Provider 可用" : "Provider 未配置"}</span></div>
+        {loading && !system ? <LoadingRows /> : <div className="system-config-grid">{systemItems.map(([label, value]) => <div key={label}><span>{label}</span><strong>{value}</strong></div>)}</div>}
+        <p className="settings-note">服务端参数来自 <code>.env</code>，为避免 Web UI 写入密钥或造成重启后配置漂移，此处只读；修改后重启服务生效。</p>
+      </article>
+    </section>
+  </div>;
+}
+
+function MediaPreview({ item, contentId, title, index, lowBandwidth }: { item: ContentDetail["metadata"]["media"][number]; contentId: number; title: string; index: number; lowBandwidth: boolean }) {
   const src = mediaUrl(contentId, item.local_path);
   const kind = item.kind || item.mime_type.split("/", 1)[0];
-  if (kind === "video" || item.mime_type.startsWith("video/")) return <video controls preload="metadata" src={src} />;
-  if (kind === "audio" || item.mime_type.startsWith("audio/")) return <div className="audio-preview"><strong>音频 {index + 1}</strong><audio controls preload="metadata" src={src} /></div>;
+  if (kind === "video" || item.mime_type.startsWith("video/")) return <video controls preload={lowBandwidth ? "none" : "metadata"} src={src} />;
+  if (kind === "audio" || item.mime_type.startsWith("audio/")) return <div className="audio-preview"><strong>音频 {index + 1}</strong><audio controls preload={lowBandwidth ? "none" : "metadata"} src={src} /></div>;
   if (kind === "image" || item.mime_type.startsWith("image/")) return <img loading="lazy" src={src} alt={`${title} 图片 ${index + 1}`} />;
   return <a className="unknown-media" href={src} target="_blank" rel="noreferrer"><strong>此媒体类型无法在页面内预览</strong><span>{item.mime_type || item.kind || "未知类型"} · 打开认证文件</span></a>;
 }
 
-function DetailModal({ detail, onClose }: { detail: ContentDetail; onClose: () => void }) {
+function DetailModal({ detail, onClose, lowBandwidth }: { detail: ContentDetail; onClose: () => void; lowBandwidth: boolean }) {
   const modalRef = useRef<HTMLElement>(null);
   useEffect(() => {
     const previousFocus = document.activeElement as HTMLElement | null;
@@ -544,7 +587,7 @@ function DetailModal({ detail, onClose }: { detail: ContentDetail; onClose: () =
     return () => { document.removeEventListener("keydown", onKeyDown); document.body.style.overflow = previousOverflow; previousFocus?.focus(); };
   }, [onClose]);
   const media = detail.metadata.media || [];
-  return <div className="modal-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) onClose(); }}><article ref={modalRef} className="detail-modal" role="dialog" aria-modal="true" aria-labelledby="detail-title"><button type="button" className="modal-close" onClick={onClose} aria-label="关闭详情"><Icon name="close" size={20} /></button><div className="detail-head"><div className="detail-meta"><span className={`platform-chip ${detail.platform}`}>{platformNames[detail.platform]}</span><span>{contentTypeName(detail.content_type)}</span></div><h1 id="detail-title">{detail.title}</h1><p>{detail.author || "未知作者"} · {formatDate(detail.published_at)}</p><a className="button-link" href={detail.source_url} target="_blank" rel="noreferrer">查看公开原文 <span aria-hidden="true">↗</span></a></div>{detail.integrity_status && detail.integrity_status !== "complete" && <p className="detail-integrity-warning" role="alert">此旧归档未通过当前完整性账本核验，请检查原始文件或重新采集。</p>}{media.length > 0 && <div className="media-gallery">{media.map((item, index) => <MediaPreview key={item.local_path} item={item} contentId={detail.id} title={detail.title} index={index} />)}</div>}<section className="detail-copy"><p className="eyebrow">内容正文</p><h2>文案</h2><p>{detail.metadata.text || "暂无文案"}</p></section><section className="file-list"><p className="eyebrow">文件信息</p><h2>归档文件</h2>{media.length ? media.map(item => <div key={item.local_path}><code>{item.local_path}</code><small>{formatBytes(item.size_bytes)} · SHA-256 {item.sha256.slice(0, 12)}…</small></div>) : <p className="muted">这条归档没有媒体文件。</p>}</section></article></div>;
+  return <div className="modal-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) onClose(); }}><article ref={modalRef} className="detail-modal" role="dialog" aria-modal="true" aria-labelledby="detail-title"><button type="button" className="modal-close" onClick={onClose} aria-label="关闭详情"><Icon name="close" size={20} /></button><div className="detail-head"><div className="detail-meta"><span className={`platform-chip ${detail.platform}`}>{platformNames[detail.platform]}</span><span>{contentTypeName(detail.content_type)}</span></div><h1 id="detail-title">{detail.title}</h1><p>{detail.author || "未知作者"} · {formatDate(detail.published_at)}</p><a className="button-link" href={detail.source_url} target="_blank" rel="noreferrer">查看公开原文 <span aria-hidden="true">↗</span></a></div>{detail.integrity_status && detail.integrity_status !== "complete" && <p className="detail-integrity-warning" role="alert">此旧归档未通过当前完整性账本核验，请检查原始文件或重新采集。</p>}{media.length > 0 && <div className="media-gallery">{media.map((item, index) => <MediaPreview key={item.local_path} item={item} contentId={detail.id} title={detail.title} index={index} lowBandwidth={lowBandwidth} />)}</div>}<section className="detail-copy"><p className="eyebrow">内容正文</p><h2>文案</h2><p>{detail.metadata.text || "暂无文案"}</p></section><section className="file-list"><p className="eyebrow">文件信息</p><h2>归档文件</h2>{media.length ? media.map(item => <div key={item.local_path}><code>{item.local_path}</code><small>{formatBytes(item.size_bytes)} · SHA-256 {item.sha256.slice(0, 12)}…</small></div>) : <p className="muted">这条归档没有媒体文件。</p>}</section></article></div>;
 }
 
 export default function App() {
@@ -556,10 +599,13 @@ export default function App() {
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [contents, setContents] = useState<Content[]>([]);
   const [runs, setRuns] = useState<CrawlRun[]>([]);
-  const [contentPage, setContentPage] = useState<PageResponse<Content>>({ items: [], total: 0, offset: 0, limit: CONTENT_PAGE_SIZE, has_more: false });
-  const [runPage, setRunPage] = useState<PageResponse<CrawlRun>>({ items: [], total: 0, offset: 0, limit: RUN_PAGE_SIZE, has_more: false });
+  const [preferences, setPreferences] = useState<UiPreferences>(loadUiPreferences);
+  const [contentPage, setContentPage] = useState<PageResponse<Content>>({ items: [], total: 0, offset: 0, limit: preferences.contentPageSize, has_more: false });
+  const [runPage, setRunPage] = useState<PageResponse<CrawlRun>>({ items: [], total: 0, offset: 0, limit: preferences.runPageSize, has_more: false });
   const [summary, setSummary] = useState<Summary | null>(null);
   const [storage, setStorage] = useState<StorageInfo | null>(null);
+  const [system, setSystem] = useState<SystemSettings | null>(null);
+  const [systemLoading, setSystemLoading] = useState(false);
   const [feedFilters, setFeedFilters] = useState<FeedFilters>(emptyFeedFilters);
   const [loadingFeed, setLoadingFeed] = useState(false);
   const [loadingRuns, setLoadingRuns] = useState(false);
@@ -595,9 +641,9 @@ export default function App() {
     query.delete("offset"); query.delete("limit");
     const queryString = query.toString();
     if (updateLocation) feedLocation.current = { query: queryString, offset };
-    query.set("offset", String(offset)); query.set("limit", String(CONTENT_PAGE_SIZE));
+    query.set("offset", String(offset)); query.set("limit", String(preferences.contentPageSize));
     try {
-      const page = normalizePage(await api<PageResponse<Content> | Content[]>(`/contents?${query}`, { signal: request.signal }), offset, CONTENT_PAGE_SIZE);
+      const page = normalizePage(await api<PageResponse<Content> | Content[]>(`/contents?${query}`, { signal: request.signal }), offset, preferences.contentPageSize);
       if (request.signal.aborted || feedGeneration.current !== generation) return;
       feedLocation.current = { query: queryString, offset: page.offset };
       setContents(page.items); setContentPage(page);
@@ -612,46 +658,59 @@ export default function App() {
         setLoadingFeed(false);
       }
     }
-  }, []);
+  }, [preferences.contentPageSize]);
   const loadRuns = useCallback(async (offset = 0) => {
     setLoadingRuns(true);
     try {
-      const page = normalizePage(await api<PageResponse<CrawlRun> | CrawlRun[]>(`/runs?offset=${offset}&limit=${RUN_PAGE_SIZE}`), offset, RUN_PAGE_SIZE);
+      const page = normalizePage(await api<PageResponse<CrawlRun> | CrawlRun[]>(`/runs?offset=${offset}&limit=${preferences.runPageSize}`), offset, preferences.runPageSize);
       setRuns(page.items); setRunPage(page);
     } catch (caught) { setError(caught instanceof Error ? caught.message : "读取任务记录失败"); }
     finally { setLoadingRuns(false); }
+  }, [preferences.runPageSize]);
+  const loadSystem = useCallback(async () => {
+    setSystemLoading(true);
+    try { setSystem(await api<SystemSettings>("/system-settings")); }
+    catch (caught) { setError(caught instanceof Error ? caught.message : "读取系统设置失败"); }
+    finally { setSystemLoading(false); }
   }, []);
   const loadAll = useCallback(async () => {
     setDashboardLoading(true);
-    setFeedFilters(emptyFeedFilters);
     try {
-      const results = await Promise.allSettled([
-        loadAccounts(),
-        loadFeed(new URLSearchParams(), 0, { showLoading: false }),
-        api<PageResponse<CrawlRun> | CrawlRun[]>(`/runs?offset=0&limit=${RUN_PAGE_SIZE}`).then(value => { const page = normalizePage(value, 0, RUN_PAGE_SIZE); setRuns(page.items); setRunPage(page); }),
-        api<Summary>("/summary").then(setSummary),
-        api<StorageInfo>("/storage").then(setStorage)
-      ]);
+      const jobs: Promise<unknown>[] = [loadAccounts()];
+      if (view === "overview") {
+        jobs.push(api<Summary>("/summary").then(setSummary), api<StorageInfo>("/storage").then(setStorage));
+      } else if (view === "feed") {
+        jobs.push(loadFeed(new URLSearchParams(feedLocation.current.query), 0, { showLoading: false }));
+      } else if (view === "runs") {
+        jobs.push(loadRuns(0));
+      } else if (view === "settings") {
+        jobs.push(loadSystem());
+      }
+      const results = await Promise.allSettled(jobs);
       const failures = results.flatMap(result => result.status === "rejected" ? [result.reason] : []);
       if (!failures.length) return;
       const unauthorized = failures.find(caught => caught instanceof ApiError && caught.status === 401);
       if (unauthorized) { clearAuth(); setAuth(null); return; }
       const caught = failures[0]; setError(caught instanceof Error ? caught.message : "部分数据读取失败");
     } finally { setDashboardLoading(false); }
-  }, [loadAccounts, loadFeed]);
+  }, [loadAccounts, loadFeed, loadRuns, loadSystem, view]);
   const refreshVisible = useCallback(async () => {
     if (document.visibilityState === "hidden") return;
     const currentFeed = feedLocation.current;
-    const results = await Promise.allSettled([
-      api<Account[]>("/accounts").then(setAccounts),
-      loadFeed(new URLSearchParams(currentFeed.query), currentFeed.offset, { showLoading: false, skipIfBusy: true, updateLocation: false }),
-      api<PageResponse<CrawlRun> | CrawlRun[]>(`/runs?offset=${runPage.offset}&limit=${RUN_PAGE_SIZE}`).then(value => { const page = normalizePage(value, runPage.offset, RUN_PAGE_SIZE); setRuns(page.items); setRunPage(page); }),
-      api<Summary>("/summary").then(setSummary),
-      api<StorageInfo>("/storage").then(setStorage)
-    ]);
+    const jobs: Promise<unknown>[] = [];
+    if (view === "overview") {
+      jobs.push(api<Account[]>("/accounts").then(setAccounts), api<Summary>("/summary").then(setSummary));
+    } else if (view === "feed") {
+      jobs.push(loadFeed(new URLSearchParams(currentFeed.query), currentFeed.offset, { showLoading: false, skipIfBusy: true, updateLocation: false }));
+    } else if (view === "accounts") {
+      jobs.push(api<Account[]>("/accounts").then(setAccounts));
+    } else if (view === "runs") {
+      jobs.push(loadRuns(runPage.offset));
+    }
+    const results = await Promise.allSettled(jobs);
     const failure = results.find(result => result.status === "rejected") as PromiseRejectedResult | undefined;
     if (failure && !(failure.reason instanceof ApiError && failure.reason.status === 401)) setError(failure.reason instanceof Error ? failure.reason.message : "自动刷新失败");
-  }, [loadFeed, runPage.offset]);
+  }, [loadFeed, loadRuns, runPage.offset, view]);
   const checkAuth = useCallback(async () => {
     setChecking(true); setStartupError("");
     try { const value = await api<AuthResponse>("/auth/me"); saveAuth(value); setAuth(value); }
@@ -675,7 +734,9 @@ export default function App() {
     const schedule = () => {
       if (timer !== undefined) window.clearTimeout(timer);
       if (cancelled || document.visibilityState === "hidden") return;
-      timer = window.setTimeout(async () => { await refreshVisible(); schedule(); }, polling ? 5000 : 30000);
+      const seconds = polling ? 5 : preferences.refreshSeconds;
+      if (!seconds) return;
+      timer = window.setTimeout(async () => { await refreshVisible(); schedule(); }, seconds * 1000);
     };
     const visibilityChanged = () => {
       if (document.visibilityState === "hidden") { if (timer !== undefined) window.clearTimeout(timer); return; }
@@ -684,7 +745,11 @@ export default function App() {
     document.addEventListener("visibilitychange", visibilityChanged);
     schedule();
     return () => { cancelled = true; if (timer !== undefined) window.clearTimeout(timer); document.removeEventListener("visibilitychange", visibilityChanged); };
-  }, [auth, polling, refreshVisible]);
+  }, [auth, polling, preferences.refreshSeconds, refreshVisible]);
+  function updatePreferences(value: UiPreferences) {
+    saveUiPreferences(value);
+    setPreferences(value);
+  }
   async function logout() { try { await api("/auth/logout", { method: "POST" }); } finally { cancelFeedRequest(true); clearAuth(); setAuth(null); } }
   async function openDetail(id: number) { try { setDetail(await api<ContentDetail>(`/contents/${id}`)); } catch (caught) { setError(caught instanceof Error ? caught.message : "读取详情失败"); } }
   function changeView(next: View) {
@@ -701,7 +766,8 @@ export default function App() {
     { id: "feed", label: "内容归档", icon: "archive" },
     { id: "accounts", label: "监控账号", icon: "accounts" },
     { id: "sessions", label: "平台登录", icon: "sessions" },
-    { id: "runs", label: "任务记录", icon: "runs" }
+    { id: "runs", label: "任务记录", icon: "runs" },
+    { id: "settings", label: "系统设置", icon: "settings" }
   ];
   const currentLabel = nav.find(item => item.id === view)?.label || "概览";
   return <div className="app-shell">
@@ -719,8 +785,9 @@ export default function App() {
       {view === "accounts" && <Accounts accounts={accounts} loading={accountsLoading} loadError={accountsLoadError} reload={loadAll} setError={setError} />}
       {view === "sessions" && <AutoPlatformSessions accounts={accounts} setError={setError} onImported={loadAll} />}
       {view === "runs" && <Runs runs={runs} accounts={accounts} page={runPage} onPage={offset => void loadRuns(offset)} loading={loadingRuns || (dashboardLoading && !runs.length)} />}
+      {view === "settings" && <SettingsView system={system} loading={systemLoading} preferences={preferences} onChange={updatePreferences} />}
     </main>
     {mobileLayout && <nav className="mobile-nav" aria-label="移动端主导航">{nav.map(item => <button type="button" key={item.id} className={view === item.id ? "active" : ""} aria-current={view === item.id ? "page" : undefined} onClick={() => changeView(item.id)}><Icon name={item.icon} size={19} /><span>{item.label}</span></button>)}</nav>}
-    {detail && <DetailModal detail={detail} onClose={closeDetail} />}
+    {detail && <DetailModal detail={detail} onClose={closeDetail} lowBandwidth={preferences.lowBandwidth} />}
   </div>;
 }

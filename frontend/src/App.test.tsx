@@ -104,10 +104,11 @@ describe("dashboard account loading", () => {
     }));
 
     const { container } = render(<App />);
-    await waitFor(() => expect(contentReads).toBe(1));
+    await waitFor(() => expect(container.querySelector(".sidebar")).not.toBeNull());
     const feedNav = container.querySelector<HTMLButtonElement>(".sidebar nav button:nth-child(2)");
     expect(feedNav).not.toBeNull();
     fireEvent.click(feedNav!);
+    await waitFor(() => expect(contentReads).toBe(1));
 
     act(() => document.dispatchEvent(new Event("visibilitychange")));
     await waitFor(() => expect(contentReads).toBe(2));
@@ -186,14 +187,15 @@ describe("dashboard account loading", () => {
     }));
 
     const view = render(<App />);
+    await waitFor(() => expect(view.container.querySelector(".sidebar")).not.toBeNull());
+    fireEvent.click(view.container.querySelector<HTMLButtonElement>(".sidebar nav button:nth-child(2)")!);
     await waitFor(() => expect(feedSignal).not.toBeNull());
     view.unmount();
 
     expectAborted(feedSignal);
   });
 
-  it("aborts an active feed request when another API call returns 401", async () => {
-    let storageReads = 0;
+  it("aborts an active feed request when session expiry is announced", async () => {
     let feedSignal: AbortSignal | null = null;
     const pendingFeed = new Promise<Response>(() => undefined);
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -201,7 +203,7 @@ describe("dashboard account loading", () => {
       if (path === "/api/auth/me") return json({ username: "admin", csrf_token: "csrf" });
       if (path === "/api/accounts" || path === "/api/runs") return json([]);
       if (path === "/api/summary") return json({ accounts: 0, healthy_accounts: 0, contents: 0, failed_runs: 0 });
-      if (path === "/api/storage") return storageReads++ === 0 ? json(storage) : json({ detail: "session expired" }, 401);
+      if (path === "/api/storage") return json(storage);
       if (path === "/api/contents") {
         if (!urlHasFilter(input)) return json([]);
         feedSignal = init?.signal || null;
@@ -218,7 +220,7 @@ describe("dashboard account loading", () => {
     fireEvent.submit(container.querySelector<HTMLFormElement>("form.filters")!);
     await waitFor(() => expect(feedSignal).not.toBeNull());
 
-    act(() => document.dispatchEvent(new Event("visibilitychange")));
+    act(() => window.dispatchEvent(new Event("archive-api-unauthorized")));
     await waitFor(() => expect(container.querySelector(".login-form")).not.toBeNull());
 
     expectAborted(feedSignal);

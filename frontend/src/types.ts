@@ -80,6 +80,22 @@ export interface StorageInfo {
   downloads_paused: boolean;
 }
 export interface Summary { accounts: number; healthy_accounts: number; contents: number; failed_runs: number }
+export interface SystemSettings {
+  scheduler_enabled: boolean;
+  provider_configured: boolean;
+  provider_discovery_limit: number;
+  provider_poll_concurrency: number;
+  scheduler_batch_size: number;
+  download_concurrency: number;
+  archive_size_cache_seconds: number;
+  min_free_disk_gb: number;
+  media_max_bytes: number;
+  provider_request_timeout_seconds: number;
+  request_timeout_seconds: number;
+  download_process_timeout_seconds: number;
+  poll_jitter_minutes: number;
+  database_journal_mode: string;
+}
 export type PlatformSessionStatus = "logged_out" | "starting" | "qr_ready" | "authenticated" | "expired" | "manual_verification_required" | "error";
 export interface PlatformSession {
   platform: Platform;

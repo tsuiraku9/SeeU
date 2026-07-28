@@ -65,6 +65,7 @@ from .schemas import (
     LoginRequest,
     MessageOut,
     StorageOut,
+    SystemSettingsOut,
 )
 from .scheduler import create_scheduler
 from .rebuild import reconcile_legacy_content_index, restore_account_ledgers
@@ -665,7 +666,7 @@ async def import_archive(
             content_type=str(manifest.get("content_type") or "unknown"),
         )
         try:
-            archive_path, metadata = ArchiveManager(settings).archive_from_files(
+            archive_path, metadata = await ArchiveManager(settings).archive_from_files_async(
                 content,
                 account.slug,
                 extracted,
@@ -877,20 +878,50 @@ def storage_info(request: Request, db: DbSession) -> dict:
     return ArchiveManager(settings).storage_status()
 
 
+@app.get("/api/system-settings", response_model=SystemSettingsOut)
+def system_settings(request: Request, db: DbSession) -> dict:
+    """Expose effective non-secret tuning values for the administrator UI."""
+
+    require_session(request, db)
+    journal_mode = str(db.connection().exec_driver_sql("PRAGMA journal_mode").scalar_one())
+    return {
+        "scheduler_enabled": settings.scheduler_enabled,
+        "provider_configured": settings.provider_configured,
+        "provider_discovery_limit": settings.provider_discovery_limit,
+        "provider_poll_concurrency": settings.provider_poll_concurrency,
+        "scheduler_batch_size": settings.scheduler_batch_size,
+        "download_concurrency": settings.download_concurrency,
+        "archive_size_cache_seconds": settings.archive_size_cache_seconds,
+        "min_free_disk_gb": settings.min_free_disk_gb,
+        "media_max_bytes": settings.media_max_bytes,
+        "provider_request_timeout_seconds": settings.provider_request_timeout_seconds,
+        "request_timeout_seconds": settings.request_timeout_seconds,
+        "download_process_timeout_seconds": settings.download_process_timeout_seconds,
+        "poll_jitter_minutes": settings.poll_jitter_minutes,
+        "database_journal_mode": journal_mode.lower(),
+    }
+
+
 @app.get("/api/summary")
 def summary(request: Request, db: DbSession) -> dict:
     require_session(request, db)
+    values = db.execute(
+        select(
+            select(func.count(Account.id)).scalar_subquery(),
+            select(func.count(Account.id))
+            .where(Account.status == AccountStatus.healthy)
+            .scalar_subquery(),
+            select(func.count(ContentIndex.id)).scalar_subquery(),
+            select(func.count(CrawlRun.id))
+            .where(CrawlRun.status == JobStatus.failed)
+            .scalar_subquery(),
+        )
+    ).one()
     return {
-        "accounts": db.scalar(select(func.count(Account.id))) or 0,
-        "healthy_accounts": db.scalar(
-            select(func.count(Account.id)).where(Account.status == AccountStatus.healthy)
-        )
-        or 0,
-        "contents": db.scalar(select(func.count(ContentIndex.id))) or 0,
-        "failed_runs": db.scalar(
-            select(func.count(CrawlRun.id)).where(CrawlRun.status == JobStatus.failed)
-        )
-        or 0,
+        "accounts": int(values[0] or 0),
+        "healthy_accounts": int(values[1] or 0),
+        "contents": int(values[2] or 0),
+        "failed_runs": int(values[3] or 0),
     }
 
 

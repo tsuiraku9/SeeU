@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import ipaddress
 import json
+import logging
 import mimetypes
 import os
 import re
@@ -11,16 +12,23 @@ import signal
 import shutil
 import socket
 import sys
+import threading
+import time
 import uuid
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any, Callable, TypeVar
 from urllib.parse import urljoin, urlparse
 
 import httpx
 
 from .adapters.base import MediaCandidate, NormalizedContent, USER_AGENT
 from .config import Settings
+
+
+logger = logging.getLogger(__name__)
+_T = TypeVar("_T")
 
 
 class InsufficientStorageError(RuntimeError):
@@ -41,6 +49,8 @@ def markdown_escape(value: str) -> str:
 
 
 ALLOWED_MEDIA_PREFIXES = ("image/", "video/", "audio/")
+_STORAGE_CACHE_LOCK = threading.Lock()
+_ARCHIVE_SIZE_CACHE: dict[Path, tuple[float, int, int]] = {}
 
 
 def _media_family(mime_type: str) -> str:
@@ -87,13 +97,7 @@ class ArchiveManager:
 
     def storage_status(self) -> dict[str, int | bool]:
         usage = shutil.disk_usage(self.root)
-        archive_bytes = 0
-        for path in self.root.rglob("*"):
-            if path.is_file():
-                try:
-                    archive_bytes += path.stat().st_size
-                except OSError:
-                    continue
+        archive_bytes = self._cached_archive_size()
         minimum = int(self.settings.min_free_disk_gb * 1024**3)
         return {
             "total_bytes": usage.total,
@@ -103,6 +107,54 @@ class ArchiveManager:
             "minimum_free_bytes": minimum,
             "downloads_paused": usage.free < minimum,
         }
+
+    def _cached_archive_size(self) -> int:
+        now = time.monotonic()
+        try:
+            root_modified = self.root.stat().st_mtime_ns
+        except OSError:
+            root_modified = 0
+        with _STORAGE_CACHE_LOCK:
+            cached = _ARCHIVE_SIZE_CACHE.get(self.root)
+            if (
+                cached
+                and cached[2] == root_modified
+                and now - cached[0] < self.settings.archive_size_cache_seconds
+            ):
+                return cached[1]
+            archive_bytes = 0
+            for path in self.root.rglob("*"):
+                if path.is_file():
+                    try:
+                        archive_bytes += path.stat().st_size
+                    except OSError:
+                        continue
+            _ARCHIVE_SIZE_CACHE[self.root] = (
+                time.monotonic(),
+                archive_bytes,
+                root_modified,
+            )
+            return archive_bytes
+
+    def _invalidate_storage_cache(self) -> None:
+        with _STORAGE_CACHE_LOCK:
+            _ARCHIVE_SIZE_CACHE.pop(self.root, None)
+
+    @staticmethod
+    async def _run_blocking(
+        function: Callable[..., _T], *args: Any, **kwargs: Any
+    ) -> _T:
+        """Wait for filesystem work to finish before propagating cancellation."""
+
+        task = asyncio.create_task(asyncio.to_thread(function, *args, **kwargs))
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            try:
+                await task
+            except Exception as exc:
+                logger.warning("Cancelled archive worker finished with an error: %s", exc)
+            raise
 
     def _assert_storage(self) -> None:
         free_bytes = shutil.disk_usage(self.root).free
@@ -223,7 +275,9 @@ class ArchiveManager:
         self._assert_storage()
         target = self._target_directory(content, account_slug)
         if target.exists():
-            return self._validate_existing_archive(target, content, len(content.media))
+            return await self._run_blocking(
+                self._validate_existing_archive, target, content, len(content.media)
+            )
         if not content.media and content.content_type.lower() != "text":
             raise ArchiveError("Non-text content has no downloadable media")
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -238,7 +292,7 @@ class ArchiveManager:
                 media_records.extend(record)
             if len(media_records) < len(content.media):
                 raise ArchiveError("One or more expected media files were not downloaded")
-            self._validate_manifest_files(temporary, media_records)
+            await self._run_blocking(self._validate_manifest_files, temporary, media_records)
             content_type = self._normalized_content_type(content.content_type, media_records)
             metadata = {
                 "schema_version": 2,
@@ -270,6 +324,7 @@ class ArchiveManager:
                 json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8"
             )
             os.replace(temporary, target)
+            self._invalidate_storage_cache()
             return target, metadata
         except BaseException:
             shutil.rmtree(temporary, ignore_errors=True)
@@ -381,10 +436,37 @@ class ArchiveManager:
             (temporary / "content.md").write_text(markdown, encoding="utf-8")
             (temporary / "metadata.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
             os.replace(temporary, target)
+            self._invalidate_storage_cache()
             return target, metadata
         except BaseException:
             shutil.rmtree(temporary, ignore_errors=True)
             raise
+
+    async def archive_from_files_async(
+        self,
+        content: NormalizedContent,
+        account_slug: str,
+        source_root: Path,
+        media_records: list[dict],
+        *,
+        expected_media_count: int | None = None,
+        provider_complete: bool = True,
+    ) -> tuple[Path, dict]:
+        """Run hashing and file promotion off the event loop.
+
+        Cancellation waits for the worker thread to leave the staging directory
+        before callers clean it up, preventing a race with provider cleanup.
+        """
+
+        return await self._run_blocking(
+            self.archive_from_files,
+            content,
+            account_slug,
+            source_root,
+            media_records,
+            expected_media_count=expected_media_count,
+            provider_complete=provider_complete,
+        )
 
     async def _download_candidate(
         self, candidate: MediaCandidate, media_dir: Path, index: int

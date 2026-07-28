@@ -193,6 +193,7 @@ docker compose logs -f archive
 | 平台登录 | 展示外部 Provider 返回的二维码、状态和人工验证链接 |
 | 数据导入 | 校验并导入带版本清单的 ZIP |
 | 任务记录 | 查看发现数、归档数、失败原因和 Provider 路径 |
+| 系统设置 | 调整当前浏览器的刷新、分页和低带宽偏好，查看服务端生效参数 |
 
 已有归档的账号执行删除时只会停用，系统不会连带删除归档文件。
 
@@ -333,9 +334,12 @@ Windows 上可在容器创建 `data/` 后，用**真实登录用户**的管理�
 | `PROVIDER_API_TOKEN` | 空 | 与 Provider 共享的 Bearer Token，至少 24 字符 |
 | `PROVIDER_DISCOVERY_LIMIT` | `10` | 单次历史内容发现上限，可设 10–500 |
 | `PROVIDER_POLL_CONCURRENCY` | `1` | Provider 全局轮询并发，可设 1–4 |
+| `SCHEDULER_BATCH_SIZE` | `4` | 每轮调度最多接纳的到期账号数，可设 1–100 |
 | `POLL_JITTER_MINUTES` | `5` | 成功轮询后的随机调度抖动 |
 | `MIN_FREE_DISK_GB` | `5` | 空闲空间低于该值时暂停归档 |
+| `ARCHIVE_SIZE_CACHE_SECONDS` | `300` | Web UI 归档体积递归统计的缓存时间 |
 | `MEDIA_MAX_BYTES` | `2147483648` | 单条内容累计媒体上限，默认 2 GiB |
+| `DOWNLOAD_CONCURRENCY` | `2` | 归档媒体下载并发上限 |
 | `IMPORT_MAX_BYTES` | `2147483648` | 单个 ZIP 导入上限，默认 2 GiB |
 | `IMPORT_MAX_FILES` | `100` | 单次 Provider / ZIP 文件数上限 |
 | `SCHEDULER_ENABLED` | `true` | 是否运行自动轮询调度器 |
@@ -344,6 +348,19 @@ Windows 上可在容器创建 `data/` 后，用**真实登录用户**的管理�
 账号轮询间隔在 Web UI 中逐个设置，默认 60 分钟，可设 5–1440 分钟。其他资源和
 兼容性设置见 [`.env.example`](.env.example)；`ALLOW_FAKE_IP_DNS` 只应在明确使用
 Clash / Mihomo 标准 Fake-IP DNS 时启用。
+
+### 4 核 4G / 低带宽建议
+
+4 核 4G 且 SeeU 与 Provider 同机时，建议先保持
+`PROVIDER_POLL_CONCURRENCY=1`、`SCHEDULER_BATCH_SIZE=2`、
+`PROVIDER_DISCOVERY_LIMIT=10` 和 `ARCHIVE_MEMORY_LIMIT=1536m`。Web UI 的“系统设置”
+中保持 60–120 秒自动刷新、24 条内容分页并启用低带宽模式。不要在同一时刻手动轮询
+多个账号；浏览器型 Provider 应独立限制为单个浏览器工作槽。3 Mbps 链路下载
+1 GiB 媒体理论上至少需要约 45 分钟，因此 Provider 与 SeeU 的 900 秒默认超时可能
+需要按实际媒体上限同步提高，或把单条媒体上限调低。
+
+归档体积会缓存，但剩余磁盘空间每次仍实时读取。媒体清单的 SHA-256 校验和文件复制
+在线程池执行，不会阻塞 Web API；SQLite 使用 WAL、有限连接池和 32 MiB 页缓存。
 
 ## 📦 数据目录
 

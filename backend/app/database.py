@@ -16,6 +16,9 @@ settings = get_settings()
 engine = create_engine(
     f"sqlite:///{settings.database_path.as_posix()}",
     connect_args={"check_same_thread": False},
+    pool_size=5,
+    max_overflow=2,
+    pool_timeout=30,
 )
 
 
@@ -24,6 +27,10 @@ def configure_sqlite(dbapi_connection, _connection_record) -> None:  # type: ign
     cursor = dbapi_connection.cursor()
     cursor.execute("PRAGMA foreign_keys=ON")
     cursor.execute("PRAGMA busy_timeout=5000")
+    cursor.execute("PRAGMA synchronous=NORMAL")
+    cursor.execute("PRAGMA temp_store=MEMORY")
+    cursor.execute("PRAGMA cache_size=-32768")
+    cursor.execute("PRAGMA journal_size_limit=67108864")
     cursor.close()
 
 
@@ -91,4 +98,24 @@ def _migrate_sqlite_columns() -> None:
         connection.exec_driver_sql(
             "CREATE INDEX IF NOT EXISTS ix_observed_content_retry_pending "
             "ON observed_content (retry_pending)"
+        )
+        connection.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_accounts_due "
+            "ON accounts (enabled, next_poll_at)"
+        )
+        connection.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_content_account_published "
+            "ON content_index (account_id, published_at DESC)"
+        )
+        connection.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_crawl_runs_account_started "
+            "ON crawl_runs (account_id, started_at DESC)"
+        )
+        connection.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_crawl_runs_started "
+            "ON crawl_runs (started_at DESC)"
+        )
+        connection.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_crawl_runs_status "
+            "ON crawl_runs (status)"
         )

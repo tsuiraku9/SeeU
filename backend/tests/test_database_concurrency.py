@@ -8,6 +8,8 @@ def test_sqlite_startup_configures_wal_before_concurrent_connections():
     init_database()
     with engine.connect() as connection:
         assert connection.exec_driver_sql("PRAGMA journal_mode").scalar_one().lower() == "wal"
+        assert connection.exec_driver_sql("PRAGMA synchronous").scalar_one() == 1
+        assert connection.exec_driver_sql("PRAGMA cache_size").scalar_one() == -32768
 
     # A fresh server process receives the dashboard requests concurrently. New
     # connections must not each try to change the database-wide journal mode.
@@ -24,4 +26,3 @@ def test_sqlite_startup_configures_wal_before_concurrent_connections():
         counts = list(executor.map(lambda _index: read_account_count(), range(workers)))
 
     assert counts == [0] * workers
-
